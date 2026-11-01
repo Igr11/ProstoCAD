@@ -74,7 +74,7 @@ def test_3_a_full_folder_and_an_stl():
     """A folder with many FreeCAD files and STLs opens and changes without hanging (the user: it hung on a new
     folder); an STL shows its shaded picture."""
     import time
-    folder = "/Volumes/Docs/Plasticity_projects"
+    folder = "/Users/igor/Plasticity_projects"
     if not os.path.isdir(folder):
         return
     dlg = open_dialog.OpenDialog(Gui.getMainWindow(), "Import", ST["dir"], "STEP or STL (*.step *.stp *.stl *.STL);;All files (*)")

@@ -3,7 +3,7 @@ the transaction is aborted, the model recomputed back to its previous state, and
 import traceback
 from dataclasses import dataclass, field
 
-from incad.core import log
+from incad.core import faceted, log
 
 _depth = 0
 _busy = None
@@ -61,9 +61,23 @@ def loose_piece(feature):
         return ""
 
 
-def _broken(obj, check_shape, deep=True):
+def _valid(obj, shape, checked=None):
+    """shape.isValid(), once per check (`checked`: a set of names found valid): a Solid's shape is a copy of its
+    tip's, so the two count as one (the user's STL hook: 4 s an isValid, twice for every Extrude)."""
+    tip = getattr(obj, "Tip", None) if obj.TypeId == "PartDesign::Body" else None
+    key = getattr(tip if tip is not None else obj, "Name", None)
+    if checked is not None and key is not None and key in checked:
+        return True
+    ok = shape.isValid()
+    if ok and checked is not None and key is not None:
+        checked.add(key)
+    return ok
+
+
+def _broken(obj, check_shape, deep=True, checked=None):
     """Reason text if obj failed to compute or (check_shape) has invalid PartDesign geometry, else ''. deep=False
-    leaves out the full geometry check (isValid: 0.6 s on a big threaded part, 2 s on a slow PC, every preview)."""
+    leaves out the full geometry check (isValid: 0.6 s on a big threaded part, 2 s on a slow PC, every preview);
+    checked: shapes already found valid in this check."""
     state = getattr(obj, "State", [])
     if "Invalid" in state or "Error" in state:
         status = _status(obj)
@@ -95,7 +109,7 @@ def _broken(obj, check_shape, deep=True):
         return "%s failed to compute" % obj.Label
     if check_shape and obj.TypeId.startswith("PartDesign::"):
         shape = getattr(obj, "Shape", None)
-        if deep and shape is not None and not shape.isNull() and not shape.isValid():
+        if deep and shape is not None and not shape.isNull() and not _valid(obj, shape, checked):
             from incad.core import thread_order
             if obj.TypeId in thread_order.KINDS and _has_modeled_thread(getattr(obj, "BaseFeature", None)):
                 return ("%s crosses a modeled (helical) thread, which FreeCAD's kernel can't cut or join through: "
@@ -326,7 +340,8 @@ def broken_now(doc, broken_before, touched, deep=True):
     """[(name, reason)] of the objects that were fine (not in broken_before) and are broken now — a step below End
     of Part left out (the user: moving End of Part above the lid's grip ribs was undone, the lid's Boolean below it
     having lost its tool)."""
-    found = [(o.Name, _broken(o, o.Name in touched, deep)) for o in doc.Objects
+    checked = set()
+    found = [(o.Name, _broken(o, o.Name in touched, deep, checked)) for o in doc.Objects
              if o.Name not in broken_before and not beyond_end(o)]
     return [(n, why) for n, why in found if why]
 
@@ -382,6 +397,7 @@ def run_safely(label, fn, doc=None, only=None, quiet_broken=False):
         if only is None and open_sketch(doc) is not None:  # a sketch tool: the open sketch and what it made only
             only = [open_sketch(doc)] + [o for o in doc.Objects if o.Name not in names_before]
         touched = {o.Name for o in doc.Objects if "Touched" in o.State or o.Name not in names_before}
+        faceted.skip_refine([o for o in doc.Objects if o.Name in touched])
         doc.recompute(only) if only else doc.recompute()
         found = broken_now(doc, broken_before, {o.Name for o in only} if only else touched)
         if found:

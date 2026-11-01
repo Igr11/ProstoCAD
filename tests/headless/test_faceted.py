@@ -51,5 +51,32 @@ class BooleanFeatureTest(unittest.TestCase):
             App.closeDocument(doc.Name)
 
 
+class RefineTest(unittest.TestCase):
+    """The user: Extrude / Revolve on an STL hook took a minute each — FreeCAD's Refine over 25 856 faces."""
+
+    def test_a_feature_on_triangles_is_not_refined_an_ordinary_one_is(self):
+        from incad.core import safe
+        doc = util.new_doc("Fr")
+        try:
+            tri = doc.addObject("PartDesign::Body", "Tri")
+            base = doc.addObject("Part::Feature", "TriShape"); base.Shape = faceted_solid()
+            tri.BaseFeature = base
+            plain = doc.addObject("PartDesign::Body", "Plain")
+            doc.recompute()
+            made = {}
+
+            def run():
+                for body in (tri, plain):
+                    made[body.Name] = util.add_pad(body, util.add_rect_sketch(body, 30, 30, "Sk" + body.Name), 15)
+            self.assertTrue(safe.run_safely("Pads", run, doc).ok)
+            self.assertFalse(made["Tri"].Refine, "built on the triangles: no Refine")
+            self.assertTrue(made["Plain"].Refine, "an ordinary part keeps FreeCAD's Refine")
+            self.assertTrue(made["Tri"].Shape.isValid())
+            self.assertNotIn("Invalid", made["Tri"].State)
+            self.assertEqual(faceted.skip_refine([made["Plain"], None]), [])
+        finally:
+            App.closeDocument(doc.Name)
+
+
 if __name__ == "__main__":
     unittest.main()

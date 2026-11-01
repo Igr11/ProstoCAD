@@ -33,3 +33,38 @@ def refusal(label, shape):
     return ("%s is made of an STL's triangles (%d faces): a Boolean with it can run for hours and freeze the program. "
             "Rebuild it as features first (Smooth, or by hand from sections), then combine."
             % (label, len(shape.Faces)))
+
+
+def skip_refine(objs):
+    """Refine off for each feature among `objs` built on a faceted solid (the user: Extrude / Revolve on an STL hook took
+    a minute each, every preview again): FreeCAD's Refine looked at all 25 856 faces, 67-75 s, without it 3-7 s; the
+    STL's flat triangles are merged already (STL → STEP). Written only on change; returns the names turned off."""
+    off = []
+    for o in objs or ():
+        try:
+            if not getattr(o, "Refine", False):
+                continue
+            base = getattr(o, "BaseFeature", None)
+            if base is None or not is_faceted(base.Shape):
+                continue
+            o.Refine = False
+            off.append(o.Name)
+        except Exception:
+            pass
+    if off:
+        from incad.core import log
+        log.logger().info("Refine off (built on an STL's triangles): %s", ", ".join(off))
+    return off
+
+
+def base_changed(obj):
+    """A feature put into a Solid (FreeCAD sets its BaseFeature) by a command or dialog: Refine off before anything
+    computes it (Extrude's and Revolve's own create computed it once, 58 s, before the dialog's first preview). Not
+    while a file loads, an undo replays or a recompute runs: only inside a command's open step."""
+    try:
+        doc = obj.Document
+        if doc.Restoring or doc.Recomputing or not doc.HasPendingTransaction:
+            return []
+    except Exception:
+        return []
+    return skip_refine([obj])

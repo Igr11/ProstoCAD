@@ -5,6 +5,15 @@ This build: VERSION
 Newest build first. The build name is the name of the zip file.
 
 
+0.17.0
+------
+Improvements
+- STEP export writes the edges' curves on their surfaces and offset surfaces (rounds, shells) as B-splines: other CAD programs (Plasticity and others) read the part as it is - no open faces, no edges a few millimetres off.
+- Picking three points (Section by 3 Points, Work Plane ▸ Three points): after two points, a faint plane through them and the point under the pointer shows.
+
+Bug fixes
+- Extrude, Revolve and other features on a solid made of an STL's triangles took over a minute each, every preview again: FreeCAD's Refine is left off there (the triangles are merged already) and the part is checked once, not twice - about 10 s now on a 25 000-face part.
+
 0.16.2
 ------
 Improvements

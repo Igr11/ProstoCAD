@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Opened by "InCad.app" on the Desktop: a Claude Code session in the InCad project.
 # Resumes your latest conversation in this project when there is one, otherwise starts a new one.
-PROJ="/Volumes/Docs/Claude projects/InCad"
+PROJ="/Users/igor/Claude_projects/InCad"
 CLAUDE="$HOME/.local/bin/claude"
 [[ -x "$CLAUDE" ]] || CLAUDE="$(command -v claude)" || { echo "❌ Claude Code not found."; read -k1 "?Press any key…"; exit 1; }
 printf '\e]0;InCad\a'

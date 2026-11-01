@@ -8,7 +8,7 @@ import time
 import traceback
 
 from incad import host
-from incad.core import commands, log, perf, prefs, safe
+from incad.core import commands, faceted, log, perf, prefs, safe
 from incad.qt import dispose, QAction, QtCore, QtGui, QtWidgets
 from incad.ui import fresh_redraw, ribbon_layout
 from incad.ui import theme as themes
@@ -93,6 +93,8 @@ class _DocObserver:
 
     def slotChangedObject(self, obj, prop):
         self.callback()
+        if prop == "BaseFeature":  # a feature put into a Solid: no Refine on an STL's triangles
+            faceted.base_changed(obj)
         if prop == "ExternalGeometry" and self.projection_callback is not None \
                 and getattr(obj, "TypeId", "") == "Sketcher::SketchObject":
             self.projection_callback(obj)  # FreeCAD sets it on many recomputes: only the projection follow-up
@@ -174,6 +176,7 @@ class _PointPick:
         from pivy import coin
         self.view, self.points, self.kinds, self.picked = view, points, kinds, []
         self.count, self.prompt, self.on_done, self.on_cancel = count, prompt, on_done, on_cancel
+        self._plane = None  # the faint plane through the points (show_plane)
         self.node = coin.SoAnnotation()  # drawn on top of the part
         for kind, color in (("corner", (0.95, 0.62, 0.29)), ("other", (0.40, 0.70, 1.0))):
             pts = [p for p, k in zip(points, kinds) if (k == "corner") == (kind == "corner")]
@@ -196,6 +199,52 @@ class _PointPick:
             self.view.getSceneGraph().removeChild(self.node)
         except Exception:
             pass
+
+    def show_plane(self, pts):
+        """A faint plane through three points (the user: see the plane the three points make while picking them),
+        a little larger than they span; None or points in a line: none."""
+        from pivy import coin
+        if self._plane is not None:
+            self.node.removeChild(self._plane)
+            self._plane = None
+        if not pts or len(pts) != 3:
+            return
+        a, b, c = pts
+        n = (b - a).cross(c - a)
+        if n.Length < 1e-9 * max(1.0, (b - a).Length * (c - a).Length):
+            return
+        n.normalize()
+        u = b - a
+        u.normalize()
+        w = n.cross(u)
+        centre = (a + b + c) * (1.0 / 3.0)
+        span = max((p - centre).Length for p in pts) * 1.6 + 1.0
+        corners = [centre + u * su * span + w * sw * span for su, sw in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+        sep = coin.SoSeparator()
+        mat = coin.SoMaterial()  # light enough to see on the dark background too (the user)
+        mat.diffuseColor.setValue(0.55, 0.78, 1.0)
+        mat.emissiveColor.setValue(0.25, 0.4, 0.6)
+        mat.transparency.setValue(0.65)
+        hints = coin.SoShapeHints()
+        hints.vertexOrdering = coin.SoShapeHints.UNKNOWN_ORDERING  # both sides lit
+        coords = coin.SoCoordinate3()
+        coords.point.setValues(0, 4, [(p.x, p.y, p.z) for p in corners])
+        face = coin.SoFaceSet()
+        face.numVertices.setValue(4)
+        edge = coin.SoSeparator()
+        ec = coin.SoBaseColor()
+        ec.rgb.setValue(0.6, 0.85, 1.0)
+        width = coin.SoDrawStyle()
+        width.lineWidth = 2
+        line = coin.SoLineSet()
+        lc = coin.SoCoordinate3()
+        lc.point.setValues(0, 5, [(p.x, p.y, p.z) for p in corners + corners[:1]])
+        for x in (ec, width, lc, line):
+            edge.addChild(x)
+        for x in (mat, hints, coords, face, edge):
+            sep.addChild(x)
+        self.node.insertChild(sep, 0)  # under the markers
+        self._plane = sep
 
     def nearest(self, viewport, x, y, within_px=16):
         """Index of the marker under a viewport click (logical px, top-left origin), or None."""
@@ -773,6 +822,7 @@ class Shell(QtCore.QObject):
         self.browser.parameterClicked.connect(self._on_parameter_clicked)
         self.status.dofClicked.connect(lambda: self.registry.run("sketch.show_dof"))
         self.navigator.click_hook = self._click_hook
+        self.navigator.move_hook = self._move_hook
         self.navigator.dblclick_hook = self._dblclick_hook
         from incad.ui.asm_drag import AssemblyDrag
         self.asm_drag = AssemblyDrag(self)
@@ -2402,6 +2452,13 @@ class Shell(QtCore.QObject):
                 if c.Name:
                     return obj, c.Name
         return None, None
+
+    def _move_hook(self, view, viewport, x, y):
+        """A plain move: picking three points, the plane through two picked and the marker under the pointer shows."""
+        pick = self._point_pick
+        if pick is not None and pick.count == 3 and len(pick.picked) == 2:
+            i = pick.nearest(viewport, x, y)
+            pick.show_plane(pick.picked + [pick.points[i]] if i is not None else None)
 
     def _click_hook(self, view, viewport, x, y):
         if self._point_pick is not None:
@@ -4198,6 +4255,8 @@ class Shell(QtCore.QObject):
             return True
         pick.picked.append(p)
         n = len(pick.picked)
+        if pick.count == 3 and n == 3:
+            pick.show_plane(pick.picked)  # (the section or the plane dialog takes over from here)
         if n < pick.count:
             self.status.set_prompt("%d of %d points picked (Esc cancels)" % (n, pick.count))
             self.schedule_refresh()

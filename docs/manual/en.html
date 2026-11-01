@@ -76,12 +76,12 @@ table.mm td:nth-child(2), table.mm td:nth-child(3) { width: 39%; }
     <div class="bar"></div>
     <div class="meta">
       ProstoCAD for FreeCAD (formerly InCad): an Autodesk Inventor / Alibre style workbench<br>
-      Version 0.16.2 — test build<br>
+      Version 0.17.0 — test build<br>
       <!--mac-->FreeCAD 1.1 (tested with 1.1.3) · macOS on Apple Silicon<!--/mac--><!--win FreeCAD 1.1 (tested with 1.1.3) · Windows 10 / 11 (x64), test build win-->
     </div>
   </div>
   <div class="foot">
-    This manual describes ProstoCAD as it is in build 0.16.2. Screen names (ribbon tabs, buttons, dialog fields) are written
+    This manual describes ProstoCAD as it is in build 0.17.0. Screen names (ribbon tabs, buttons, dialog fields) are written
     exactly as they appear on screen. What changed from build to build is in CHANGES.txt; installation in short is in
     README.txt. October 2026.
   </div>
@@ -131,8 +131,8 @@ brings FreeCAD's own interface back at any time; choose <span class="ui">ProstoC
 to come back.</p>
 <p>A file that was not made in ProstoCAD opens as well, with every tool: when it comes to the front it becomes a ProstoCAD part by itself (its largest Solid is the main one; a STEP opened as it is gets a Solid for each of its shapes, where they are). Save keeps that.</p>
 
-<div class="keep"><h2>This build: 0.16.2, a test build</h2>
-<p>0.16.2 is a test build. New in 0.16.2: a chamfer wider than a face stops at the face's far edge instead of failing; fillet and chamfer sizes start at 0.5 mm and step by 0.1 mm; a click on a feature in the tree and Appearance on many faces are fast again. Fixed in 0.16.1: an open section follows changes to the part; End of Part stays where it is moved above or below a Boolean; dialogs of a feature made outside them show its own values; with End of Part moved up, dialogs leave the steps below it alone. New in 0.16.0: much faster on big parts (sketch tools, feature dialogs, a Boolean with a clearance, painted faces); Edit Feature on a face and Edit on a Solid; Interference in a part; Project Geometry copies edges of another Solid; <kbd>Esc</kbd> stops long work; <kbd>Space</kbd> hides and shows.  Assemblies came in 0.2.0, Move Face in 0.3.0, ProstoCAD's own sketch Offset and Concentric in
+<div class="keep"><h2>This build: 0.17.0, a test build</h2>
+<p>0.17.0 is a test build. New in 0.17.0: STEP export that other CAD programs read as it is (no open faces, no edges off); a faint plane through the points while picking three; features on a solid made of an STL's triangles about ten times faster. New in 0.16.2: a chamfer wider than a face stops at the face's far edge instead of failing; fillet and chamfer sizes start at 0.5 mm and step by 0.1 mm; a click on a feature in the tree and Appearance on many faces are fast again. Fixed in 0.16.1: an open section follows changes to the part; End of Part stays where it is moved above or below a Boolean; dialogs of a feature made outside them show its own values; with End of Part moved up, dialogs leave the steps below it alone. New in 0.16.0: much faster on big parts (sketch tools, feature dialogs, a Boolean with a clearance, painted faces); Edit Feature on a face and Edit on a Solid; Interference in a part; Project Geometry copies edges of another Solid; <kbd>Esc</kbd> stops long work; <kbd>Space</kbd> hides and shows.  Assemblies came in 0.2.0, Move Face in 0.3.0, ProstoCAD's own sketch Offset and Concentric in
 0.4.0, <b>Text</b> and <b>Emboss</b> in 0.5.0, STEP and STL export in 0.5.1. New in 0.5.2: big parts work much faster
 (recomputing, editing an early feature, clicking a face), and a slot or two arcs can be dimensioned by their
 <b>outer edges</b> (5.3). 0.5.3 makes Text and sketch patterns, deleting, every new or changed value (only the

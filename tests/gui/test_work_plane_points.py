@@ -68,9 +68,13 @@ def test_1_points_light_up_and_three_clicks_make_the_plane():
     view = Gui.ActiveDocument.ActiveView
     vp = view.graphicsView().viewport()
     dpr = vp.devicePixelRatioF()
-    for p in wanted:
+    for k, p in enumerate(wanted):
         i = next(i for i, q in enumerate(pick.points) if (q - p).Length < 1e-6)
         sx, sy = view.getPointOnViewport(pick.points[i])
+        if k == 2:  # two picked, the pointer on the third: the faint plane through the three shows (the user)
+            assert pick._plane is None
+            s()._move_hook(view, vp, sx / dpr, vp.height() - sy / dpr)
+            assert pick._plane is not None, "no plane while the third point is pointed at"
         s()._point_clicked(vp, sx / dpr, vp.height() - sy / dpr)
         harness.pump(400)
     harness.pump(1500)

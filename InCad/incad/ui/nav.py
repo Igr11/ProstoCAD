@@ -62,6 +62,7 @@ class Navigator(QtCore.QObject):
         # the Dimension tool's dead zone (incad.ui.dimension_place): move(view, viewport, x, y) -> None or the
         # (x, y) FreeCAD gets instead for a plain move; press() on every press
         self.place_hook = None
+        self.move_hook = None  # callable(view, viewport, x, y) on every plain move (no button): a point pick's plane
         self._handle_viewport = None  # the viewport of a handle drag going on
         self._handle_press = None     # (x, y, modifiers) of its press
         self._swallow_release = False
@@ -129,6 +130,8 @@ class Navigator(QtCore.QObject):
                     if instead is not None:
                         self._move_instead(obj, instead, event.modifiers())
                         return True
+            if self.move_hook is not None and kind == "move" and event.buttons() == QtCore.Qt.NoButton:
+                self.move_hook(view, obj, pos.x(), pos.y())
             if self.handle_hook is not None and self.mode is None and machine.state == "idle":
                 if kind in ("press", "dblclick") and event.button() == QtCore.Qt.LeftButton \
                         and event.buttons() == QtCore.Qt.LeftButton and not event.modifiers() & SELECT_MODIFIERS \

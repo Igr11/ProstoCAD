@@ -18,7 +18,7 @@ from incad.ui.assembly_context import NAME  # noqa: E402
 from headless.test_assembly import save_part  # noqa: E402
 
 ST = {}
-TRAIN = "/Volumes/Docs/Plasticity_projects"
+TRAIN = "/Users/igor/Plasticity_projects"
 
 
 def s():

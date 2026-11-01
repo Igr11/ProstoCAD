@@ -2,7 +2,7 @@
 import time
 import traceback
 
-from incad.core import document, log, model, perf, safe
+from incad.core import document, faceted, log, model, perf, safe
 from incad.qt import dispose, QtCore, QtWidgets
 from incad.ui.feature_dialog import FeatureDialog
 
@@ -1533,6 +1533,7 @@ class FeatureSession(QtCore.QObject):
                 if o.Visibility:
                     self._set_visible(o, False)
             self._set_visible(self.feature, True)  # show_finished then shows its last helper instead, if any
+        faceted.skip_refine(own or [self.feature])
         watch = _Recomputed()
         import FreeCAD as App
         App.addDocumentObserver(watch)
