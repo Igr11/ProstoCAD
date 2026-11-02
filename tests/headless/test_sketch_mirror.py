@@ -26,6 +26,28 @@ class MirrorTest(unittest.TestCase):
     def tearDown(self):
         App.closeDocument(self.doc.Name)
 
+    def projected(self, *geoms):
+        """Projected edges in the sketch (ids -3, -4…): another sketch's geometry, as Project gives it."""
+        ref = self.body.newObject("Sketcher::SketchObject", "Ref")
+        ref.AttachmentSupport = [(util.xy_plane(self.body), "")]
+        ref.MapMode = "FlatFace"
+        for g in geoms:
+            ref.addGeometry(g)
+        self.doc.recompute()
+        for i in range(len(geoms)):
+            self.sk.addExternal(ref.Name, "Edge%d" % (i + 1))
+        self.doc.recompute()
+        return [-3 - i for i in range(len(geoms))]
+
+    def test_about_a_projected_line(self):
+        (ext,) = self.projected(Part.LineSegment(V(5, -10, 0), V(5, 10, 0)))
+        ids = self.rectangle(-10, 0, 4, 3)
+        r = safe.run_safely("Mirror", lambda: mir.mirror(self.sk, ids, ("edge", ext)), self.doc)
+        self.assertTrue(r.ok, r.error)
+        self.doc.recompute()
+        xs = sorted(round(self.sk.getPoint(g, k).x, 6) for g in r.value for k in (1, 2))
+        self.assertEqual((xs[0], xs[-1]), (16.0, 20.0))
+
     def rectangle(self, x0, y0, w, h):
         sk = self.sk
         pts = [V(x0, y0, 0), V(x0 + w, y0, 0), V(x0 + w, y0 + h, 0), V(x0, y0 + h, 0)]

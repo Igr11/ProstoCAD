@@ -6,7 +6,7 @@ import FreeCAD as App
 import Part
 import Sketcher
 
-from incad.core import safe
+from incad.core import offset2d, safe
 
 PICK_MSG = "Click a line, arc, circle, ellipse or spline of the sketch"
 TOO_LARGE_MSG = "The offset is too large for this shape"
@@ -19,12 +19,28 @@ def _kind(geo):
     return type(geo).__name__
 
 
+def _geo(sk, g):
+    """The geometry of a Sketcher id: the sketch's own from 0 up, projected edges -3 down."""
+    return sk.Geometry[g] if g >= 0 else sk.ExternalGeo[-g - 1]
+
+
+def _ids(sk):
+    """The sketch's own geometry and its projected edges (not the axes)."""
+    return list(range(sk.GeometryCount)) + [-1 - k for k in range(2, len(sk.ExternalGeo))]
+
+
+def _construction(sk, g):
+    """Construction? A projected edge counts as construction unless it is marked normal (part of the profile)."""
+    if g >= 0:
+        return bool(sk.getConstruction(g))
+    from incad.core import sketch as sketches
+    return not sketches.is_defining(sk, g)
+
+
 def _usable(sk, g):
-    if g < 0 or g >= sk.GeometryCount:
+    if g >= sk.GeometryCount or (g < 0 and not -len(sk.ExternalGeo) <= g <= -3):
         return False
-    if sk.getConstruction(g) or _kind(sk.Geometry[g]) == "Point":
-        return False
-    return True
+    return _kind(_geo(sk, g)) != "Point"  # construction and projected too (the user's law: a tool takes every line)
 
 
 def _closed_alone(geo):
@@ -36,17 +52,39 @@ def _closed_alone(geo):
 
 
 def _ends(sk, g):
+    if g < 0:
+        geo = _geo(sk, g)
+        return App.Vector(geo.StartPoint), App.Vector(geo.EndPoint)
     return sk.getPoint(g, 1), sk.getPoint(g, 2)
 
 
 def outline(sk, g):
-    """(geometry indexes in order, closed) of the outline geometry `g` belongs to: the normal geometry joined to it
-    end to end (a rectangle's four lines, a chain drawn line by line), or the one closed curve itself."""
+    """(geometry indexes in order, closed) of the outline geometry `g` belongs to: the geometry joined to it end to
+    end (a rectangle's four lines, a chain drawn line by line), normal and construction alike (the user's law: equal
+    rights), or the one closed curve itself. A point is never part of one."""
     if not _usable(sk, g):
         raise ValueError(PICK_MSG)
-    if _closed_alone(sk.Geometry[g]):
+    if _closed_alone(_geo(sk, g)):
         return [g], True
-    others = [h for h in range(sk.GeometryCount) if h != g and _usable(sk, h) and not _closed_alone(sk.Geometry[h])]
+    # its own kind first (a construction diagonal drawn before a rectangle turned a click on a side into a
+    # triangle, the finder); both kinds when only that closes the outline (two sides construction, two normal)
+    kind = _construction(sk, g)
+    own = _chain(sk, g, lambda h: _construction(sk, h) == kind)
+    if own[1]:
+        return own
+    mixed = _chain(sk, g, lambda h: True)
+    if not mixed[1]:
+        return own
+    for h in mixed[0]:  # a line of the other kind that is part of a closed outline of its own kind is that
+        if _construction(sk, h) != kind and _chain(sk, h, lambda x: _construction(sk, x) != kind)[1]:
+            return own  # outline's, not this one's (a click on a construction diagonal: the diagonal alone)
+    return mixed
+
+
+def _chain(sk, g, take):
+    """(indexes, closed) of the chain through g over the usable geometry `take` accepts."""
+    others = [h for h in _ids(sk) if h != g and _usable(sk, h) and not _closed_alone(_geo(sk, h))
+              and take(h)]
 
     def step(cur, point, used):
         for h in others:
@@ -86,7 +124,7 @@ def outline(sk, g):
 
 
 def _wire(sk, chain):
-    edges = [sk.Geometry[g].toShape() for g in chain]
+    edges = [_geo(sk, g).toShape() for g in chain]
     return Part.Wire(Part.__sortEdges__(edges)) if len(edges) > 1 else Part.Wire(edges)
 
 
@@ -142,7 +180,7 @@ def _offset(sk, chain, closed, pointer, distance=None):
     d = distance if distance is not None else wire.distToShape(probe)[0]
     if d < 1e-4:
         raise ValueError(NEAR_MSG)
-    if all(_kind(sk.Geometry[g]) == "LineSegment" for g in chain):
+    if all(_kind(_geo(sk, g)) == "LineSegment" for g in chain):
         best = None
         for sign in (1, -1):
             try:
@@ -165,7 +203,7 @@ def _offset(sk, chain, closed, pointer, distance=None):
         if closed:
             face = Part.Face(wire)
             sign = -1 if face.isInside(App.Vector(pointer.x, pointer.y, 0), 1e-7, True) else 1
-            res = face.makeOffset2D(sign * d, 2)
+            res = offset2d.offset2d(face, sign * d, 2)  # (a small circle crashed OCC: by its radius)
             if res.isNull() or not res.Faces or res.Area < _TOL:
                 raise ValueError(TOO_LARGE_MSG)
             new = res.Faces[0].OuterWire
@@ -259,7 +297,7 @@ def _original_line(sk, chain, line, d):
     u.normalize()
     best, best_err = None, 1e-4
     for g in chain:
-        o = sk.Geometry[g]
+        o = _geo(sk, g)
         if _kind(o) != "LineSegment":
             continue
         w = o.EndPoint - o.StartPoint
@@ -273,7 +311,7 @@ def _original_line(sk, chain, line, d):
 
 def _original_round(sk, chain, curve, d):
     for g in chain:
-        o = sk.Geometry[g]
+        o = _geo(sk, g)
         if _kind(o) in ("Circle", "ArcOfCircle") and _same(o.Center, curve.Center) and \
                 abs(abs(o.Radius - curve.Radius) - d) < 1e-4:
             return g
@@ -283,7 +321,7 @@ def _original_round(sk, chain, curve, d):
 def _smooth(sk, gi, gj, p):
     """Do geometries gi and gj run on in one direction through their shared point p?"""
     def direction(g):
-        geo = sk.Geometry[g]
+        geo = _geo(sk, g)
         t = geo.tangent(geo.parameter(p))[0]
         return App.Vector(t.x, t.y, 0)
     a, b = direction(gi), direction(gj)
@@ -300,6 +338,10 @@ def add(sk, chain, closed, pointer, distance=None):
     ids = sk.addGeometry(curves, False)
     if isinstance(ids, int):
         ids = [ids]
+    if len(ids) == len(chain):  # each copy of the kind of its original (a construction side stays construction)
+        for orig, copy in zip(chain, ids):
+            if orig >= 0 and sk.getConstruction(orig):  # (a projected edge's copy is drawn: normal)
+                sk.setConstruction(copy, True)
     joints = []
     for i, gi in enumerate(ids):  # consecutive copies share their end points: Tangent where the outline runs on
         for gj in ids[i + 1:]:    # smoothly (a slot's arcs and lines), Coincident at a sharp corner

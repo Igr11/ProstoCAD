@@ -36,6 +36,28 @@ class HoleTest(unittest.TestCase):
         self.assertIs(kind_for(f), hole)
         self.assertEqual(hole.read(self.doc, f)["diameter"], "4 mm")
 
+    def test_to_a_face_follows_the_part_made_thicker(self):
+        """The depth to the bottom face was measured once: the part made 20 mm left the hole blind."""
+        sk = self.body.newObject("Sketcher::SketchObject", "Pt")
+        sk.AttachmentSupport = [(util.xy_plane(self.body), "")]
+        sk.MapMode = "FlatFace"
+        sk.AttachmentOffset = App.Placement(App.Vector(0, 0, 10), App.Rotation())
+        sk.addGeometry(Part.Point(App.Vector(10, 5, 0)))
+        self.doc.recompute()
+        bottom = [i + 1 for i, f in enumerate(self.pad.Shape.Faces) if abs(f.CenterOfMass.z) < 1e-6][0]
+        v = dict(hole.defaults(self.doc, self.body, None), sketch=sk.Name, depth_type="to", diameter="4 mm",
+                 to_face="%s:Face%d" % (self.pad.Name, bottom), tip="flat")
+        f = hole.create(self.doc, self.body, None, v)
+        self.doc.recompute()
+        self.pad.Length = 20
+        sk.AttachmentOffset = App.Placement(App.Vector(0, 0, 20), App.Rotation())
+        self.doc.recompute()
+        self.assertEqual(hole.follow(self.doc), [f.Label])
+        self.doc.recompute()
+        self.assertAlmostEqual(f.Depth.Value, 20, places=6)
+        self.assertAlmostEqual(self.body.Shape.Volume, 4000 - math.pi * 4 * 20, places=2)
+        self.assertEqual(hole.follow(self.doc), [], "in step now: nothing more to do")
+
     def test_counterbore(self):
         sk = self.sketch_with_circle()
         v = dict(hole.defaults(self.doc, self.body, None), sketch=sk.Name, seat="counterbore", depth_type="through_all",
@@ -65,6 +87,31 @@ class HoleTest(unittest.TestCase):
         c = f.Shape.BoundBox.Center
         self.assertLess(self.body.Shape.Volume, boss.Shape.Volume)
         self.assertAlmostEqual(hole.read(self.doc, f)["placement"], "concentric")
+
+    def test_concentric_follows_its_round_edge(self):
+        """The helper sketch held fixed points: a boss moved left its hole off-centre."""
+        sk = self.body.newObject("Sketcher::SketchObject", "Boss")
+        sk.AttachmentSupport = [(self.pad, "Face%d" % self.top)]
+        sk.MapMode = "FlatFace"
+        sk.addGeometry(Part.Circle(App.Vector(10, 5, 0), App.Vector(0, 0, 1), 3))
+        self.doc.recompute()
+        boss = util.add_pad(self.body, sk, 5, "BossPad")
+        self.body.Tip = boss
+        self.doc.recompute()
+        rim = [i + 1 for i, e in enumerate(boss.Shape.Edges)
+               if e.Curve.TypeId == "Part::GeomCircle" and abs(e.CenterOfMass.z - 15) < 1e-6][0]
+        v = dict(hole.defaults(self.doc, self.body, None), placement="concentric", edge="%s:Edge%d" % (boss.Name, rim),
+                 diameter="2 mm", depth_type="distance", depth="3 mm", tip="flat")
+        f = hole.create(self.doc, self.body, None, v)
+        self.doc.recompute()
+        sk.delGeometries([0])
+        sk.addGeometry(Part.Circle(App.Vector(6, 5, 0), App.Vector(0, 0, 1), 3))
+        self.doc.recompute()
+        self.assertEqual(hole.follow(self.doc), [f.Label])
+        self.doc.recompute()
+        prof = f.Profile[0] if isinstance(f.Profile, (tuple, list)) else f.Profile
+        centre = prof.getGlobalPlacement().multVec(App.Vector(prof.Geometry[0].X, prof.Geometry[0].Y, 0))
+        self.assertAlmostEqual(centre.x, 6, places=5)
 
     def test_concentric_to_several_round_edges_and_faces_at_once(self):
         """The user: several holes in one go, and a round face (easier to click than its edge); no Face picked —

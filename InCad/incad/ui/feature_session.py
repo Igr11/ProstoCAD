@@ -139,6 +139,7 @@ class FeatureSession(QtCore.QObject):
         self._pending = None
         self._applied = None
         self._closed = False
+        self.finishing = False
         self._again = False
         self._then = None  # what opens once this dialog is committed (another plane of the row clicked)
         self._committed = False
@@ -160,6 +161,7 @@ class FeatureSession(QtCore.QObject):
         if doc.HasPendingTransaction:
             doc.commitTransaction()
         self._broken = safe.snapshot_broken(doc)
+        self._links = safe.link_snapshot(doc)  # the edges / faces fillets etc. are on (found again after a size edit)
         self._computed = _Recomputed()  # every object a recompute computed while the dialog is open (_abort_step)
         try:
             import FreeCAD as App
@@ -1582,6 +1584,8 @@ class FeatureSession(QtCore.QObject):
             return
         if commit and not self._sketch_open():
             self.doc.recompute()
+            if safe.repair_links(self.doc, getattr(self, "_links", {})):  # a fillet lost its edges to the new size
+                self.doc.recompute()
             # every feature's state, but only the finished part's geometry: checking each later shape took 11 s
             tip = getattr(self.body, "Tip", None)
             found = safe.problems(self.doc, self._broken, {tip.Name} if tip is not None else set())
@@ -1653,12 +1657,14 @@ class FeatureSession(QtCore.QObject):
         the values are recomputed by themselves (touched, they took every object using one with them).
         A feature put before a thread moved the thread: then everything is computed as before."""
         before = {o.Name for o in self.doc.Objects if "Touched" in o.State}
+        bases = safe.dressup_bases(self.doc, [self.feature.Name]) if _feature_alive(self.feature) else set()
         values = model._model_obj(self.doc)
         if values is not None and not getattr(self, "_moved_before_thread", False):
             with model.changing_values(self.doc, values):  # the values recomputed alone, their users left as they are
                 self.doc.abortTransaction()
         else:
             self.doc.abortTransaction()
+        safe.heal_bases(self.doc, bases)  # a refused fillet left the shape it was built on invalid
         computed = getattr(self, "_computed", None)
         if computed is None or getattr(self, "_moved_before_thread", False):
             return
@@ -1769,6 +1775,8 @@ class FeatureSession(QtCore.QObject):
         opens): every shape of a big part took 11 s, after every value typed."""
         touched = self._recomputed if self._recomputed is not None else {o.Name for o in self._own()}
         found = safe.problems(self.doc, self._broken, touched, deep=False)  # the full check once, on OK
+        if found and _feature_alive(self.feature):  # the next value tried must not start from a spoilt base
+            safe.heal_bases(self.doc, safe.dressup_bases(self.doc, [self.feature.Name]))
         text = "; ".join(found)
         rescue = None
         offer = getattr(self.kind, "rescue", None)
@@ -1859,6 +1867,12 @@ class FeatureSession(QtCore.QObject):
             if found:
                 self.dialog.set_error("; ".join(found))
                 return
+        try:
+            weak = safe.unsound(self.feature) if _feature_alive(self.feature) else ""
+        except Exception:
+            weak = ""
+        if weak:
+            log.report("warning", weak)  # kept (the user may mean it), but said: it fails later otherwise
         self._finish(commit=True)
 
     def apply(self):
@@ -1919,7 +1933,8 @@ class FeatureSession(QtCore.QObject):
         if self._closed:
             return
         self._closed = True
-        try:
+        self.finishing = True  # until the dialog is gone: the commit's recompute (seconds on an STL's triangles)
+        try:                   # lets the panel refresh, which took this session for a lost one and freed "busy"
             self._finish_steps(commit)
         except Exception as e:  # whatever failed, the dialog goes: left open it ignored every button (closed)
             log.report("warning", "%s: closing the dialog: %s" % (self.kind.TITLE, e), traceback.format_exc())
@@ -1944,6 +1959,7 @@ class FeatureSession(QtCore.QObject):
             then, self._then = self._then, None
             if then is not None and self._committed:
                 QtCore.QTimer.singleShot(0, then)
+            self.finishing = False
             after = getattr(self.kind, "after_ok", None)  # what the kind does next (Split ▸ Make Assembly)
             if after is not None and self._committed and _feature_alive(self.feature):
                 values, feature = dict(self._applied or {}), self.feature

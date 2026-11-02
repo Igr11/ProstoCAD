@@ -106,6 +106,9 @@ def _broken(obj, check_shape, deep=True, checked=None):
         if status and status not in ("Valid", "Touched"):
             from incad.core import model
             return "%s: %s" % (obj.Label, model.friendly(status, obj.TypeId))
+        from incad.core import model
+        if obj.TypeId in model._KERNEL_FAILURE:  # (a Draft gave no reason at all)
+            return "%s: %s" % (obj.Label, model._KERNEL_FAILURE[obj.TypeId])
         return "%s failed to compute" % obj.Label
     if check_shape and obj.TypeId.startswith("PartDesign::"):
         shape = getattr(obj, "Shape", None)
@@ -136,7 +139,267 @@ def _broken(obj, check_shape, deep=True, checked=None):
                             "in the part is the usual cause. Put this cut BEFORE the thread, or make the thread "
                             "cosmetic" % obj.Label)
                 return "%s cuts away the whole part: choose another axis, extent or profile" % obj.Label
+        if obj.TypeId == "PartDesign::Boolean" and shape is not None and (shape.isNull() or not shape.Solids):
+            base = getattr(obj, "BaseFeature", None)  # an empty result was kept silently: the part simply vanished
+            if base is not None and not base.Shape.isNull() and bool(base.Shape.Solids):
+                if getattr(obj, "Type", "") == "Common":
+                    return ("%s: the solids don't overlap, so Intersect leaves nothing: move a tool into the part"
+                            % obj.Label)
+                return "%s cuts away the whole part: the tool covers all of it" % obj.Label
+        if obj.TypeId == "PartDesign::Boolean" and deep and shape is not None and not shape.isNull() \
+                and _touching(shape.Solids):
+            return ("%s: the solids only touch along a line or at a point, which makes no sound solid (later "
+                    "features fail on it): move the tool a little into the part, or clear of it" % obj.Label)
     return ""
+
+
+_CUTS = ("PartDesign::Pocket", "PartDesign::Groove", "PartDesign::Hole")
+_SWEPT = ("PartDesign::AdditivePipe", "PartDesign::SubtractivePipe", "PartDesign::AdditiveLoft",
+          "PartDesign::SubtractiveLoft", "PartDesign::AdditiveHelix", "PartDesign::SubtractiveHelix")
+_EDGES = ("PartDesign::Fillet", "PartDesign::Chamfer")
+MANY_FACES = 3000  # more: the full check (about 0.4 s a thousand faces) is left out at OK
+
+
+def unsound(obj):
+    """Text for a cut or Boolean whose result the kernel calls valid but whose full check fails — a cut touching a
+    wall along a line (a circle tangent to the side) leaves a wall of no thickness there, and later features (a
+    fillet, a shell, another cut) fail on it; '' when sound, or not looked at (big, or a modeled thread: the full
+    check finds false faults on helical faces)."""
+    if obj is not None and obj.TypeId in _TRANSFORMED:
+        return _loose_copies(obj)
+    if obj is None or (obj.TypeId not in _CUTS + ("PartDesign::Boolean",) + _SWEPT + _EDGES
+                       and "InCadEmboss" not in getattr(obj, "PropertiesList", ())):  # (an Emboss wrapped on a round
+        return ""                                                                     # face had faulty edges)
+    shape = getattr(obj, "Shape", None)
+    if shape is None or shape.isNull() or len(shape.Faces) > MANY_FACES or \
+            _has_modeled_thread(getattr(obj, "BaseFeature", None)) or hasattr(obj, "InCadThread") or \
+            (obj.TypeId == "PartDesign::Hole" and getattr(obj, "ModelThread", False)):  # (a Coil is looked at)
+        return ""
+    try:
+        shape.check(True)
+        return ""
+    except Exception:
+        if obj.TypeId in _EDGES:
+            return ("%s leaves a faulty spot (tiny edges or faces that cross where it meets another face): a later "
+                    "feature may fail there. Try a slightly different size" % obj.Label)
+        if obj.TypeId.endswith("Helix"):
+            return ("%s runs through itself (its turns touch or overlap, or its profile crosses the axis): make the "
+                    "pitch larger than the profile is high, or move the profile off the axis" % obj.Label)
+        if obj.TypeId in _SWEPT:
+            return ("%s runs through itself somewhere (a path that bends tighter than the profile is wide, or a "
+                    "closed loft that comes back across itself): a later feature may fail on it. Make the profile "
+                    "smaller, the bends wider, or the loft open" % obj.Label)
+        return ("%s leaves a wall of no thickness somewhere (the cut touches a side along a line, or at a point): "
+                "it can't be printed, and a later fillet or shell may fail there. Move the profile a little into "
+                "the side, or clear of it" % obj.Label)
+
+
+_DRESSUPS = ("PartDesign::Fillet", "PartDesign::Chamfer", "PartDesign::Thickness", "PartDesign::Draft")
+
+
+def dressup_bases(doc, names):
+    """Names of the features the fillets, chamfers, shells and drafts among `names` are built on."""
+    out = set()
+    for n in names:
+        o = doc.getObject(n)
+        base = getattr(o, "BaseFeature", None) if o is not None and o.TypeId in _DRESSUPS else None
+        if base is not None:
+            out.add(base.Name)
+    return out
+
+
+_LINKED = ("PartDesign::Fillet", "PartDesign::Chamfer", "PartDesign::Thickness", "PartDesign::Draft")
+
+
+def _sig(el, box):
+    """What tells an edge or face again after a size change: its kind, curve / surface type, direction (an edge's
+    either way; a face's outward, sign kept) and where it sits in the part's box (0..1 on each axis: the right-hand
+    edge stays the right-hand one when the part gets wider)."""
+    if el.ShapeType == "Edge":
+        c = el.Curve
+        name = type(c).__name__
+        d = None
+        if name == "Line":
+            d = el.Vertexes[-1].Point - el.Vertexes[0].Point
+        elif hasattr(c, "Axis"):
+            d = c.Axis
+        signed = False
+    else:
+        name = type(el.Surface).__name__
+        try:
+            u, v = el.Surface.parameter(el.CenterOfMass)
+            d = el.normalAt(u, v)
+        except Exception:
+            d = None
+        signed = True
+    c = el.CenterOfMass
+    rel = []
+    for lo, length, x in ((box.XMin, box.XLength, c.x), (box.YMin, box.YLength, c.y), (box.ZMin, box.ZLength, c.z)):
+        rel.append((x - lo) / length if length > 1e-9 else 0.0)
+    if d is not None and d.Length > 1e-12:
+        d = d * (1.0 / d.Length)
+    return (el.ShapeType, name, d, signed, tuple(rel))
+
+
+def _alike(a, b):
+    """Same kind, type and direction (an edge's either way, a face's the same way)."""
+    if a[0] != b[0] or a[1] != b[1]:
+        return False
+    if a[2] is None or b[2] is None:
+        return a[2] is None and b[2] is None
+    dot = a[2].dot(b[2])
+    return abs(dot - 1) < 1e-6 if a[3] else abs(abs(dot) - 1) < 1e-6
+
+
+def _gap(a, b):
+    return sum((x - y) ** 2 for x, y in zip(a[4], b[4])) ** 0.5
+
+
+def link_snapshot(doc):
+    """{feature: (its picks, {element: signature} of every edge and face of the shape they are on)}, taken before
+    a change (see repair_links)."""
+    out = {}
+    for f in doc.Objects:
+        if f.TypeId not in _LINKED and "InCadShell" not in getattr(f, "PropertiesList", ()):
+            continue
+        link = getattr(f, "Base", None)
+        if not isinstance(link, tuple) or len(link) != 2 or link[0] is None:
+            continue
+        if any(not isinstance(s, str) or s.startswith("?") for s in link[1]):
+            continue
+        try:
+            shape = link[0].Shape
+            box = shape.BoundBox
+            sigs = {}
+            for kind, pool in (("Edge", shape.Edges), ("Face", shape.Faces)):
+                if any(s.startswith(kind) for s in link[1]):
+                    for i, el in enumerate(pool):
+                        sigs["%s%d" % (kind, i + 1)] = _sig(el, box)
+            out[f.Name] = (list(link[1]), sigs)
+        except Exception:
+            pass
+    return out
+
+
+NEAR = 0.02  # how close (as a share of the part's size) a found element must sit to where the lost one was
+
+
+def repair_links(doc, snap):
+    """Fillets / chamfers / shells / drafts whose edges or faces FreeCAD lost in a size change ('?Edge1': a Pad
+    made 30 high, or a sketch made wider, lost the vertical edges, and the change was refused - the commonest edit
+    there is) get them back: the one element of the same kind, type and direction that sits where the lost one
+    sat in the part's box and is no other element's continuation. Nothing is guessed: when none or two fit, the
+    link stays lost and the feature says so (a fillet moved silently to another edge was worse). Returns the
+    features repaired."""
+    fixed = []
+    for f in doc.Objects:
+        if f.Name not in snap:
+            continue
+        link = getattr(f, "Base", None)
+        if not isinstance(link, tuple) or len(link) != 2 or link[0] is None or \
+                not any(isinstance(s, str) and s.startswith("?") for s in link[1]):
+            continue
+        picks, old = snap[f.Name]
+        obj, subs = link[0], list(link[1])
+        if len(subs) != len(picks):
+            continue
+        shape = obj.Shape
+        box = shape.BoundBox
+        new_sigs = {}
+        for kind, pool in (("Edge", shape.Edges), ("Face", shape.Faces)):
+            for i, el in enumerate(pool):
+                new_sigs["%s%d" % (kind, i + 1)] = _sig(el, box)
+        taken = {s for s in subs if not s.startswith("?")}
+        result, ok = [], True
+        for sub, was in zip(subs, picks):
+            if not sub.startswith("?"):
+                result.append(sub)
+                continue
+            lost = old.get(was)
+            if lost is None:
+                ok = False
+                break
+            near = []
+            for name, sig in new_sigs.items():
+                if name in taken or not _alike(sig, lost) or _gap(sig, lost) > NEAR:
+                    continue
+                # no other element of before sits closer to it: it is the lost one moved, not a survivor
+                if any(o_name != was and _alike(o_sig, sig) and _gap(o_sig, sig) < _gap(lost, sig)
+                       for o_name, o_sig in old.items()):
+                    continue
+                near.append((_gap(sig, lost), name))
+            near.sort()
+            if not near or (len(near) > 1 and near[1][0] - near[0][0] < NEAR / 2):
+                ok = False  # none, or two alike: not guessed
+                break
+            taken.add(near[0][1])
+            result.append(near[0][1])
+        if ok:
+            f.Base = (obj, result)
+            fixed.append(f.Name)
+    if fixed:
+        log.logger().info("Edges / faces found again after a size change: %s", ", ".join(fixed))
+    return fixed
+
+
+def heal_bases(doc, names):
+    """A fillet or chamfer the kernel refused changed the shape it was built on (OCC updates the tolerances of the
+    shared edges in place): that feature was left "Unorientable", and every next feature failed on it (after a
+    Boolean join with a near-flush step). Each of `names` whose shape is invalid now is computed again. Returns
+    the names healed."""
+    healed = []
+    for n in names:
+        o = doc.getObject(n)
+        shape = getattr(o, "Shape", None) if o is not None else None
+        try:
+            if shape is None or shape.isNull() or shape.isValid():
+                continue
+            o.touch()
+            doc.recompute([o])
+            healed.append(n)
+        except Exception:
+            pass
+    if healed:
+        try:
+            doc.recompute()  # the Solid over it took the spoilt shape too: settled with the rest
+        except Exception:
+            pass
+        log.logger().info("Computed again after a refused fillet / chamfer: %s", ", ".join(healed))
+    return healed
+
+
+def _loose_copies(obj):
+    """A pattern or mirror whose copies land off the part: each such copy is a lump of its own in the Solid (a
+    later Shell or Fillet fails on a Solid of several pieces) - said, the copies kept."""
+    shape = getattr(obj, "Shape", None)
+    base = getattr(getattr(obj, "BaseFeature", None), "Shape", None)
+    try:
+        extra = len(shape.Solids) - (len(base.Solids) if base is not None and not base.isNull() else 1)
+    except Exception:
+        return ""
+    if extra <= 0:
+        return ""
+    originals = [o for o in getattr(obj, "Originals", None) or [] if o is not None]
+    if originals and all(o.TypeId in _SUBTRACTIVE for o in originals):  # cuts: they split the part, nothing lands off
+        return ("%s cuts the part into %d separate pieces in one Solid (a Shell or Fillet then fails on it): split it "
+                "with Split if that is meant" % (obj.Label, len(shape.Solids)))
+    return ("%s: %d of its copies land off the part and stay separate lumps in the Solid (a Shell or Fillet then "
+            "fails on it): fewer copies, a smaller spacing, or exclude them" % (obj.Label, extra))
+
+
+def _touching(solids, most=12):
+    """Two of the separate solids touching (a line or a point in common): the kernel calls the result valid, yet its
+    full check fails. Solids apart (a part cut in two) are fine. More than `most` solids: not looked at (slow)."""
+    if not 1 < len(solids) <= most:
+        return False
+    for i, a in enumerate(solids):
+        for b in solids[i + 1:]:
+            try:
+                if a.BoundBox.intersect(b.BoundBox) and a.distToShape(b)[0] < 1e-6:
+                    return True
+            except Exception:
+                pass
+    return False
 
 
 def _has_modeled_thread(feature):
@@ -386,6 +649,7 @@ def run_safely(label, fn, doc=None, only=None, quiet_broken=False):
     if not doc.UndoMode:
         doc.UndoMode = 1
     broken_before = snapshot_broken(doc)
+    links = link_snapshot(doc)
     names_before = {o.Name for o in doc.Objects}
     watch_esc()
     _depth += 1
@@ -399,12 +663,20 @@ def run_safely(label, fn, doc=None, only=None, quiet_broken=False):
         touched = {o.Name for o in doc.Objects if "Touched" in o.State or o.Name not in names_before}
         faceted.skip_refine([o for o in doc.Objects if o.Name in touched])
         doc.recompute(only) if only else doc.recompute()
+        if repair_links(doc, links):  # a size change lost a fillet's edges: found again, computed again
+            doc.recompute()
         found = broken_now(doc, broken_before, {o.Name for o in only} if only else touched)
         if found:
             raise _InvalidResult("; ".join(why for _n, why in found), [n for n, _why in found])
     except Exception as e:
+        try:
+            bases = dressup_bases(doc, {o.Name for o in doc.Objects if o.Name not in names_before
+                                        or "Touched" in o.State})
+        except Exception:
+            bases = set()
         doc.abortTransaction()
         doc.recompute()
+        heal_bases(doc, bases)
         _relink(doc)
         invalid = isinstance(e, _InvalidResult)
         msg = str(e) if invalid else "%s failed: %s" % (label, e)

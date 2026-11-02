@@ -95,30 +95,13 @@ def _gui():
 
 
 def tangent_circle():
-    """Sketch ▸ Tangent Circle: a circle tangent to the two or three lines, arcs or circles selected (one undo step;
-    incad.core.tangent_circle)."""
-    from incad.core import log, tangent_circle as tc
+    """Sketch ▸ Tangent Circle: the command, then clicks on the three lines, arcs or circles the circle touches
+    (incad.ui.tangent_circle_tool); two or three selected before it make the circle at once."""
     from incad.ui import shell
-    sk = shell.instance().sketches.editing()
-    if sk is None:
-        raise ValueError("Open a sketch first")
-    picks = [int(sub[4:]) - 1 for sel in _gui().Selection.getSelectionEx(sk.Document.Name) if sel.Object is sk
-             for sub in sel.SubElementNames if sub.startswith("Edge") and sub[4:].isdigit()]
-    if len(picks) not in (2, 3):
-        raise ValueError("Tangent Circle: select two or three lines, arcs or circles first (Ctrl-click), then click "
-                         "Tangent Circle")
-    doc = sk.Document
-    doc.openTransaction("Tangent Circle")
-    try:
-        tc.add(sk, picks)
-    except Exception:
-        doc.abortTransaction()
-        raise
-    doc.commitTransaction()
-    sk.recompute()
-    _gui().Selection.clearSelection()
-    log.report("info", "Tangent Circle: %s" % ("fixed by the three it touches" if len(picks) == 3 else
-                                               "its radius is free: give it a dimension"))
+    inst = shell.instance()
+    if inst is None:
+        raise ValueError("InCad is not active")
+    inst.start_tangent_circle_tool()
 
 
 def run_std(name, index=0):
@@ -300,6 +283,11 @@ def _visibility_step(label, objects, change):
     if inst is not None:
         inst.end_peek()  # the temporary "shown while selected" ends: the change acts on the real state
     document.prepare_choice(objects)
+    if safe.busy() or safe.edit_open():  # a dialog or an edit is open: showing and hiding is only looking, never
+        value = change()                 # refused (it was: "Finish the Extrude dialog first"); no undo step of its
+        if inst is not None:             # own then, the open step owns the transaction
+            inst.schedule_refresh()
+        return value
     r = safe.run_safely(label, change, App.ActiveDocument)
     if not r.ok:
         raise ValueError(r.error)
@@ -1816,7 +1804,7 @@ def commands():
                         "(Step) or move with them (Together)"),
         Command(id="sketch.circle_tangent", label="Tangent Circle", icon="circle_tangent",
                 handler=lambda: tangent_circle(), contexts=frozenset({"sketch"}),
-                tooltip="A circle tangent to the two or three lines, arcs or circles selected (three fix it)"),
+                tooltip="A circle tangent to three lines, arcs or circles: click them one after another (construction ones too)"),
         Command(id="sketch.construction", label="Construction", icon="construction",
                 handler=lambda: _construction(), contexts=frozenset({"sketch"}), checkable=True,
                 is_checked=lambda: _construction_on(),

@@ -229,7 +229,7 @@ _STAND_IN_TYPES = ("PartDesign::Fillet", "PartDesign::Chamfer", "PartDesign::Thi
 def is_stand_in(obj):
     """Features that can't be repeated themselves (a thread's helix, fillets, chamfers, shells, other patterns):
     picking one stands for the feature it modifies."""
-    return obj.TypeId.endswith("Helix") or obj.TypeId in _STAND_IN_TYPES
+    return obj.TypeId.endswith("Helix") or obj.TypeId in _STAND_IN_TYPES or "InCadShell" in obj.PropertiesList
 
 
 def _profile_supports(owner):

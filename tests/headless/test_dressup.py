@@ -31,6 +31,48 @@ class DressUpTest(unittest.TestCase):
         model.set_model_parameter(self.doc, model.bound_parameter(f, "Radius"), "1 mm")
         self.assertGreater(f.Shape.Volume, 1951.56)
 
+    def test_a_fillet_keeps_its_edges_when_the_part_gets_taller(self):
+        """FreeCAD lost the vertical edges when the Pad was made higher ('?Edge1'), and the change was refused."""
+        from incad.core import safe
+        k = dressup.FILLET
+        vertical = ["Edge%d" % (i + 1) for i, e in enumerate(self.pad.Shape.Edges)
+                    if abs(e.BoundBox.ZLength - 10) < 1e-6]
+        f = k.create(self.doc, self.body, None, dict(k.defaults(self.doc, self.body, None),
+                                                     edges=common.format_picks([(self.pad, e) for e in vertical]),
+                                                     radius="1 mm"))
+        self.doc.recompute()
+        r = safe.run_safely("Extrude", lambda: setattr(self.pad, "Length", 15), self.doc)
+        self.assertTrue(r.ok, r.error)
+        self.assertNotIn("Invalid", f.State)
+        self.assertFalse([s for s in f.Base[1] if s.startswith("?")])
+        self.assertAlmostEqual(f.Shape.BoundBox.ZLength, 15, places=6)
+
+    def test_a_fillet_stays_on_its_edge_when_the_part_gets_wider(self):
+        """The first repair took the nearest edge: the right-hand fillet jumped to the left-hand edge."""
+        import Part
+        from incad.core import safe
+        k = dressup.FILLET
+        right = ["Edge%d" % (i + 1) for i, e in enumerate(self.pad.Shape.Edges)
+                 if abs(e.BoundBox.ZLength - 10) < 1e-6 and abs(e.BoundBox.XMin - 20) < 1e-6
+                 and abs(e.BoundBox.YMin) < 1e-6]
+        f = k.create(self.doc, self.body, None, dict(k.defaults(self.doc, self.body, None),
+                                                     edges=common.format_picks([(self.pad, e) for e in right]),
+                                                     radius="1 mm"))
+        self.doc.recompute()
+        sk = self.pad.Profile[0] if isinstance(self.pad.Profile, (tuple, list)) else self.pad.Profile
+
+        def wider():
+            sk.deleteAllGeometry()
+            p = [App.Vector(0, 0, 0), App.Vector(30, 0, 0), App.Vector(30, 10, 0), App.Vector(0, 10, 0)]
+            for i in range(4):
+                sk.addGeometry(Part.LineSegment(p[i], p[(i + 1) % 4]))
+        r = safe.run_safely("Sketch", wider, self.doc)
+        if r.ok:  # found again: on the right-hand edge, never another one
+            e = f.Base[0].Shape.getElement(f.Base[1][0])
+            self.assertAlmostEqual(e.BoundBox.XMin, 30, places=6)
+        else:
+            self.assertIn("pick the edges again", r.error)
+
     def test_chamfer_types(self):
         k = dressup.CHAMFER
         for kind, volume in (("equal", 1971.33), ("two", 1945.33), ("angle", 1983.12)):
@@ -110,7 +152,7 @@ class ShellBeforeThreadTest(unittest.TestCase):
         self.assertFalse(r.ok)
         self.assertIn("Thread then fails on the hollowed part", r.error)
         self.assertEqual(self.doc.UndoCount, n0, "rolled back: no step")
-        self.assertFalse(any(o.TypeId == "PartDesign::Thickness" for o in body.Group))
+        self.assertFalse(any(o.TypeId in dressup.SHELL.TYPES and dressup.SHELL.claims(o) for o in body.Group))
         self.assertIs(body.Tip, tip)
         self.assertTrue(tip.Shape.isValid())
 
@@ -126,8 +168,87 @@ class ShellBeforeThreadTest(unittest.TestCase):
         self.assertFalse(r.ok)
         self.assertIn("and so do walls of 0.75 mm and 0.375 mm", r.error)
         self.assertEqual(self.doc.UndoCount, n0)
-        self.assertFalse(any(o.TypeId == "PartDesign::Thickness" for o in body.Group))
+        self.assertFalse(any(o.TypeId in dressup.SHELL.TYPES and dressup.SHELL.claims(o) for o in body.Group))
         self.assertIs(body.Tip, tip)
+
+
+class ShellOnOccTest(unittest.TestCase):
+    """InCad's own Shell (incad.core.shell_solid): several walls open at once where FreeCAD's Thickness failed, and
+    the closed hollow it can't make at all."""
+
+    def setUp(self):
+        import Part
+        from incad.core import document
+        self.doc = util.new_doc("Sh")
+        self.body = document.make_part(self.doc)
+        block = Part.makeBox(40, 30, 20)
+        self.src = self.doc.addObject("Part::Feature", "Src")
+        self.src.Shape = block.makeFillet(3, [e for e in block.Edges if abs(e.Vertexes[0].Point.z
+                                                                             - e.Vertexes[-1].Point.z) > 1])
+        self.body.BaseFeature = self.src
+        self.doc.recompute()
+        self.base = self.body.Tip  # the Solid's own base step: the faces are picked on it
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def faces(self, *where):
+        """'top', 'x0' (the side at x = 0), 'x40' faces of the rounded block, as picks."""
+        out = []
+        for i, f in enumerate(self.src.Shape.Faces):
+            b = f.BoundBox
+            if f.Surface.TypeId != "Part::GeomPlane":
+                continue
+            if ("top" in where and abs(b.ZMin - 20) < 1e-6) or ("x0" in where and b.XMax < 1e-6) or \
+                    ("x40" in where and b.XMin > 40 - 1e-6):
+                out.append("%s:Face%d" % (self.base.Name, i + 1))
+        return ",".join(out)
+
+    def shell(self, faces, thickness="2 mm", direction="inside"):
+        k = dressup.SHELL
+        f = k.create(self.doc, self.body, None, dict(k.defaults(self.doc, self.body, None), faces=faces,
+                                                     thickness=thickness, direction=direction, closed=not faces))
+        self.doc.recompute()
+        self.assertNotIn("Invalid", f.State, f.getStatusString())
+        self.assertIs(kind_for(f), k)
+        return f
+
+    def test_top_and_a_side_open_on_a_rounded_block(self):
+        """FreeCAD's Thickness failed here in every mode."""
+        f = self.shell(self.faces("top", "x0"))
+        s = f.Shape
+        s.check(True)
+        self.assertEqual(len(s.Solids), 1)
+        self.assertLess(s.Volume, self.src.Shape.Volume * 0.5)
+        self.assertEqual(dressup.SHELL.read(self.doc, f)["faces"], self.faces("top", "x0"))
+
+    def test_two_opposite_walls_open(self):
+        f = self.shell(self.faces("x0", "x40"))
+        self.assertEqual(len(f.Shape.Solids), 1)
+        self.assertAlmostEqual(f.Shape.BoundBox.XLength, 40, places=3)
+
+    def test_no_opening_is_a_closed_hollow(self):
+        f = self.shell("")
+        self.assertEqual(len(f.Shape.Solids), 1)
+        self.assertEqual(len(f.Shape.Shells), 2, "the outer skin and the cavity's")
+        self.assertLess(f.Shape.Volume, self.src.Shape.Volume * 0.5)
+
+    def test_a_block_rounded_all_round_is_hollowed_not_handed_back(self):
+        """OCC's ThickSolid (intersection joins) returned the part itself; it was taken for the shell."""
+        import Part
+        from incad.core import shell_solid
+        block = Part.makeBox(40, 30, 10)
+        round_all = block.makeFillet(2, block.Edges)
+        top = [f for f in round_all.Faces if f.Surface.TypeId == "Part::GeomPlane" and f.CenterOfMass.z > 9.9]
+        shape, how = shell_solid.make(round_all, top, 1.0, True)
+        self.assertLess(shape.Volume, round_all.Volume * 0.5, how)
+
+    def test_outside_with_the_top_open(self):
+        f = self.shell(self.faces("top"), thickness="1 mm", direction="outside")
+        b = f.Shape.optimalBoundingBox()  # (BoundBox is loose on round faces)
+        self.assertAlmostEqual(b.XLength, 42, places=2)
+        self.assertAlmostEqual(b.ZMax, 20, places=3)  # open at the top: the wall ends level with the part
+        self.assertAlmostEqual(b.ZMin, -1, places=3)
 
 
 class ShellBeforeThreadShaftTest(unittest.TestCase):

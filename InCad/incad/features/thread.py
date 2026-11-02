@@ -484,7 +484,9 @@ def _build(doc, body, f, values):
                "offset": values.get("offset") or "0 mm", "length_mode": values.get("length_mode") or "full",
                "internal": internal, "custom_pitch": values.get("custom_pitch"),
                "custom_angle": values.get("custom_angle"), "custom_depth": values.get("custom_depth"),
-               "custom_profile": values.get("custom_profile") or "triangle", "build": "cut"})
+               "custom_profile": values.get("custom_profile") or "triangle", "build": "cut",
+               "size_auto": _size_auto(f, values),  # chosen from the shaft: chosen again when the shaft changes
+               "measured": [round(2 * radius, 6), round(face_len, 6)]})  # see follow_part
     doc.recompute()
     if f.Shape.isNull() or not f.Shape.isValid():
         raise ValueError("The thread can't be built with these values (check the size and the clearance)")
@@ -1085,3 +1087,44 @@ def update(doc, f, values):
 
 def _pad_of(f):
     return f
+
+
+def _size_auto(f, values):
+    """Was the size chosen from the shaft (nothing picked; or the dialog showing the size chosen before, kept)?"""
+    prev = _load(f)
+    return not values.get("size") or bool(prev.get("size_auto") and values.get("size") == prev.get("size"))
+
+
+def _drifted(doc, f):
+    """True when the shaft (or bore) under a cut thread is no longer what it was built on: Full length stopped at
+    the old end of a longer shaft, and an M10 chosen for a 10 mm shaft stayed on a 12 mm one (the finder)."""
+    data = _load(f)
+    have = data.get("measured")
+    if not have or data.get("build", "cut") != "cut" or f.TypeId != "PartDesign::SubtractiveHelix":
+        return False
+    try:
+        values = read(doc, f)
+        obj, _sub, face = _face(doc, values)
+        _internal, radius, _edge, face_len = _geometry(obj, face, bool(values.get("flip")),
+                                                       _plane_of(doc, values.get("start_face")))[:4]
+    except Exception:
+        return False
+    length_matters = values.get("length_mode") != "distance"
+    return abs(2 * radius - have[0]) > 1e-6 or (length_matters and abs(face_len - have[1]) > 1e-6)
+
+
+def follow_part(doc):
+    """After a recompute (incad.ui.shell): every cut thread whose shaft changed is built again from its own
+    settings (a size chosen from the shaft chosen again; a size picked by hand that no longer fits is said).
+    Returns the labels rebuilt."""
+    from incad.core import safe
+    todo = [o for o in doc.Objects if claims(o) and _drifted(doc, o)]
+    done = []
+    for f in todo:
+        values = read(doc, f)
+        if _load(f).get("size_auto"):
+            values["size"] = ""  # chosen from the shaft: chosen again for the shaft as it is now
+        r = safe.run_safely("%s follows the shaft" % f.Label, lambda t=f, v=values: update(doc, t, v), doc)
+        if r.ok:
+            done.append(f.Label)
+    return done

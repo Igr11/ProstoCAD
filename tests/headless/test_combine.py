@@ -160,6 +160,57 @@ class CombineTest(unittest.TestCase):
         self.assertEqual((r["operation"], r["apply_to"], r["clearance"], r["tools"]),
                          ("cut", "cavity", "0.2 mm", self.tool.Name))
 
+    def test_an_empty_result_is_refused_not_kept(self):
+        """Intersect with a tool that misses the part left an empty Solid, marked fine: now it is undone, with why."""
+        from incad.core import safe
+        self.tool.Placement = App.Placement(App.Vector(200, 0, 0), App.Rotation())
+        self.doc.recompute()
+        r = safe.run_safely("Boolean", lambda: self.make(operation="intersect"), self.doc)
+        self.assertFalse(r.ok)
+        self.assertIn("don't overlap", r.error)
+        self.assertAlmostEqual(self.base.Shape.Volume, BLOCK, places=3)
+
+    def test_a_tool_a_hair_short_leaves_no_skin(self):
+        """The kernel left a 0.0005 mm skin over a hole whose tool fell that short of the top; the Boolean's fuzzy
+        tolerance takes such a tool as reaching it."""
+        self.pin.Length = 10 - 5e-4
+        self.doc.recompute()
+        f = self.make(operation="cut", clearance="0 mm")
+        self.assertEqual(len(f.Shape.Faces), 7, "the block's 6 and the hole's wall: no skin's floor at the top")
+        self.assertAlmostEqual(f.Shape.Volume, BLOCK - math.pi * 16 * 10, delta=0.1)  # the hole goes through
+
+    def test_solids_touching_along_a_line_are_refused(self):
+        """A round tool touching the block's side along a line: the kernel calls it valid, its full check fails."""
+        from incad.core import safe
+        sk = self.doc.getObject("PinSk")
+        sk.delGeometry(0)
+        sk.addGeometry(Part.Circle(App.Vector(45, 15, 0), App.Vector(0, 0, 1), 5))  # the block's side is x = 40
+        self.pin.Length = 10
+        self.doc.recompute()
+        r = safe.run_safely("Boolean", lambda: self.make(operation="join"), self.doc)
+        self.assertFalse(r.ok)
+        self.assertIn("only touch", r.error)
+
+    def test_a_refused_fillet_leaves_the_boolean_sound(self):
+        """A join with a 0.0005 mm step on top: the fillet the kernel refuses had made the Boolean "Unorientable",
+        and every next feature failed on it."""
+        from incad.core import safe
+        from incad.features import dressup
+        sk = self.doc.getObject("PinSk")
+        sk.delGeometry(0)
+        for a, b in (((30, 10), (60, 10)), ((60, 10), (60, 30)), ((60, 30), (30, 30)), ((30, 30), (30, 10))):
+            sk.addGeometry(Part.LineSegment(App.Vector(a[0], a[1], 0), App.Vector(b[0], b[1], 0)))
+        self.pin.Length = 10.0005
+        self.doc.recompute()
+        f = self.make(operation="join")
+        edges = ",".join("%s:Edge%d" % (f.Name, i + 1) for i, e in enumerate(f.Shape.Edges)
+                         if e.Curve.TypeId == "Part::GeomLine" and abs(e.tangentAt(e.FirstParameter).z) > 0.99)
+        k = dressup.FILLET
+        safe.run_safely("Fillet", lambda: k.create(self.doc, self.base, None,
+                                                   dict(k.defaults(self.doc, self.base, None), edges=edges,
+                                                        radius="1 mm")), self.doc)
+        self.assertTrue(f.Shape.isValid(), "the Boolean is left as it was")
+
     def test_base_cannot_be_a_tool(self):
         with self.assertRaises(ValueError) as ctx:
             self.make(tools=self.base.Name)

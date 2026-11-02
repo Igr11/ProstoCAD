@@ -50,8 +50,8 @@ def is_open_contour(sk):
 def key_points(sk):
     """[(kind, global Vector)] the view marks on a sketch: a spline's poles ('pole') and the points it passes
     through ('end'), a line's or arc's ends and
-    a point ('end'), a circle's or ellipse's centre ('centre'). Projected edges that are normal geometry count;
-    construction geometry is skipped; points within
+    a point ('end'), a circle's or ellipse's centre ('centre'). Construction geometry and every projected edge count
+    like normal geometry (the user's law: equal rights; only a solid's profile leaves construction out); points within
     1e-6 of an earlier one are merged (the first kind wins)."""
     pl = sk.getGlobalPlacement()
     out = []
@@ -61,15 +61,7 @@ def key_points(sk):
         if not any((g - q).Length < 1e-6 for _, q in out):
             out.append((kind, g))
 
-    normal = []
-    for i, geo in enumerate(sk.Geometry):
-        try:
-            if sk.getConstruction(i):
-                continue
-        except Exception:
-            pass
-        normal.append(geo)
-    normal += defining_geometry(sk)  # projected edges that are normal geometry (Inventor)
+    normal = list(sk.Geometry) + list(getattr(sk, "ExternalGeo", []) or [])[2:]  # not the H / V axes
     for geo in normal:
         tid = geo.TypeId
         if tid == "Part::GeomBSplineCurve":

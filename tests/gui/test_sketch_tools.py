@@ -97,7 +97,8 @@ def test_1b_offset_takes_the_whole_rectangle_and_keeps_sharp_corners():
     assert lit == sorted("Edge%d" % (g + 1) for g in ids), ("the whole outline shows caught", lit)  # the user
     _click_sketch(sk, 50, -2)  # 2 below it: the copy outside
     harness.pump(600)
-    new = list(range(first + 4, sk.GeometryCount))
+    new = [g for g in range(first + 4, sk.GeometryCount)  # not the rectangle's construction centre point
+           if type(sk.Geometry[g]).__name__ != "Point"]
     assert len(new) == 4 and all(type(sk.Geometry[g]).__name__ == "LineSegment" for g in new), \
         [type(sk.Geometry[g]).__name__ for g in new]
     corners = sorted({(round(p.x, 4), round(p.y, 4)) for g in new for p in (sk.Geometry[g].StartPoint,

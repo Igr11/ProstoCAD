@@ -96,6 +96,25 @@ class ThreadTest(unittest.TestCase):
         self.assertIs(self.body.Tip, f)
         self.assertIs(kind_for(f), thread)
 
+    def test_full_length_and_an_auto_size_follow_the_shaft(self):
+        """Full length stopped at the old end of a longer shaft; an M10 chosen for 10 mm stayed on a 12 mm shaft."""
+        pad = shaft(self.doc, self.body)
+        f = self.make(face=cyl_face(pad, 5), standard="iso", size="", clearance="0 mm")
+        self.assertEqual(thread._load(f)["size"], "M10")
+        pad.Length = 30
+        self.doc.recompute()
+        self.assertEqual(thread.follow_part(self.doc), [f.Label])
+        self.doc.recompute()
+        self.assertGreater(f.Shape.BoundBox.ZMax, 29.9)  # the groove reaches the new end
+        sk = pad.Profile[0] if isinstance(pad.Profile, (tuple, list)) else pad.Profile
+        sk.delGeometries([0])
+        sk.addGeometry(Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 6))
+        self.doc.recompute()
+        thread.follow_part(self.doc)
+        self.doc.recompute()
+        self.assertEqual(thread._load(f)["size"], "M12")
+        self.assertEqual(thread.follow_part(self.doc), [], "in step now")
+
     def test_size_is_suggested_from_the_face(self):
         pad = shaft(self.doc, self.body, radius=4.0)
         f = self.make(face=cyl_face(pad, 4), standard="iso", size="")

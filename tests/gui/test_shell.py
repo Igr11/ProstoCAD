@@ -12,6 +12,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from incad.qt import QtCore  # noqa: E402
 from incad.core import commands, prefs  # noqa: E402
 from incad.ui import shell  # noqa: E402
+from incad.features import dressup  # noqa: E402
 import headless.util as util  # noqa: E402
 
 
@@ -55,7 +56,7 @@ def test_1_shell_the_box_open_at_the_top():
     harness.pump(900)
     assert sh.feature_session is None
     tip = _body().Tip
-    assert tip.TypeId == "PartDesign::Thickness", tip.TypeId
+    assert dressup.SHELL.claims(tip) and "InCadShell" in tip.PropertiesList, tip.TypeId  # InCad's own Shell
     assert "Invalid" not in tip.State, tip.getStatusString()
     expect = full - 16 * 6 * 8  # 20x10x10 box, 2 mm walls, open top: inner 16 x 6 x 8
     assert abs(tip.Shape.Volume - expect) < 1.0, (tip.Shape.Volume, expect)
@@ -180,7 +181,7 @@ def test_3_shell_a_box_drawn_away_from_the_part():
     QTest.mouseClick(fs.dialog.ok_button, QtCore.Qt.LeftButton)
     harness.pump(900)
     assert sh.feature_session is None
-    shells = [o for o in App.ActiveDocument.Objects if o.TypeId == "PartDesign::Thickness"]
+    shells = [o for o in App.ActiveDocument.Objects if "InCadShell" in o.PropertiesList]
     assert len(shells) == 1 and shells[0].getParentGeoFeatureGroup() is other, shells
     assert other.Tip is shells[0] and "Invalid" not in shells[0].State
     assert abs(shells[0].Shape.Volume - (2000 - 18 * 8 * 9)) < 2.0, shells[0].Shape.Volume
@@ -218,7 +219,7 @@ def test_4_shell_a_box_left_in_the_parts_body_by_an_older_file():
     assert sh.feature_session is None
     other = box.getParentGeoFeatureGroup()
     assert other is not body and len(document.bodies(App.ActiveDocument)) == 2
-    shells = [o for o in App.ActiveDocument.Objects if o.TypeId == "PartDesign::Thickness"]
+    shells = [o for o in App.ActiveDocument.Objects if "InCadShell" in o.PropertiesList]
     assert len(shells) == 1 and shells[0].getParentGeoFeatureGroup() is other and "Invalid" not in shells[0].State
     assert abs(shells[0].Shape.Volume - (2000 - 18 * 8 * 9)) < 2.0, shells[0].Shape.Volume
     assert body.Tip is pad and len(pad.Shape.Solids) == 1

@@ -104,12 +104,13 @@ class KeyPointsTest(unittest.TestCase):
         for p in ((0.0, 0.0), (15.0, 4.0)):  # the ends sit on the first and last pole: marked once
             self.assertIn(p, everything, marks)
 
-    def test_construction_geometry_is_skipped(self):
+    def test_construction_geometry_is_marked_too(self):
+        """The user's law: normal and construction geometry have equal rights."""
         s = _sketch(self.doc)
         s.addGeometry(Part.LineSegment(App.Vector(0, 0, 0), App.Vector(10, 0, 0)))
         s.addGeometry(Part.Circle(App.Vector(50, 50, 0), App.Vector(0, 0, 1), 2), True)
         self.doc.recompute()
-        self.assertEqual([k for k, _ in sketch.key_points(s)], ["end", "end"])
+        self.assertEqual([k for k, _ in sketch.key_points(s)], ["end", "end", "centre"])
 
     def test_points_are_global(self):
         s = _sketch(self.doc)
@@ -118,8 +119,8 @@ class KeyPointsTest(unittest.TestCase):
         self.doc.recompute()
         self.assertEqual(self._xy(sketch.key_points(s)), [("end", 0.0, 0.0, 7.0), ("end", 10.0, 0.0, 7.0)])
 
-    def test_normal_projected_edges_are_marked_construction_ones_are_not(self):
-        """Projected edges are normal geometry by default (Inventor): their ends are marked like drawn lines."""
+    def test_projected_edges_are_marked_normal_or_construction(self):
+        """Projected edges are marked like drawn lines, construction ones too (the user's law: equal rights)."""
         src = _sketch(self.doc, "Src")
         src.addGeometry(Part.LineSegment(App.Vector(0, 0, 0), App.Vector(10, 0, 0)))
         src.addGeometry(Part.LineSegment(App.Vector(0, 5, 0), App.Vector(10, 5, 0)))
@@ -130,10 +131,11 @@ class KeyPointsTest(unittest.TestCase):
         s.addExternal(src.Name, "Edge1")
         s.addExternal(src.Name, "Edge2")
         self.doc.recompute()
-        self.assertEqual(sketch.key_points(s), [], "FreeCAD's tool projects construction")
+        want = sorted([("end", 0.0, 0.0, 0.0), ("end", 10.0, 0.0, 0.0), ("end", 0.0, 5.0, 0.0), ("end", 10.0, 5.0, 0.0)])
+        self.assertEqual(self._xy(sketch.key_points(s)), want, "FreeCAD's tool projects construction")
         sketch.set_defining(s, [-3], True)
         self.doc.recompute()
-        self.assertEqual(self._xy(sketch.key_points(s)), [("end", 0.0, 0.0, 0.0), ("end", 10.0, 0.0, 0.0)])
+        self.assertEqual(self._xy(sketch.key_points(s)), want)
 
     def test_point_geometry_is_an_end(self):
         s = _sketch(self.doc)

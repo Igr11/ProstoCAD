@@ -4,6 +4,7 @@ import FreeCAD as App
 import Part
 
 from incad.core import move_face as mf
+from incad.core import offset2d
 
 MIXED_MSG = "Pick flat faces or round walls, not both"
 NOT_STRAIGHT_MSG = "Pick a flat face or a straight round wall"
@@ -137,7 +138,7 @@ def _ring(wire, d, inside):
     s = 1 if inside else -1
     try:  # the face offset, not the wire: a face made of an offset ellipse's wire is invalid (OCC), this one is not
         a = Part.Face(wire)
-        b = a.makeOffset2D(s * d, 2)  # join 2: intersection (a smooth outline stays smooth)
+        b = offset2d.offset2d(a, s * d, 2)  # join 2: intersection (a smooth outline stays smooth)
     except Exception:
         raise ValueError(mf.TOO_LARGE_MSG)
     if not b.isValid() or b.Area < _TOL:

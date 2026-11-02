@@ -3,8 +3,10 @@ point). A pick is a point of the sketch's geometry (an end, a centre; the origin
 line or curve under it, else the sketch's X / Y axis — dimensions and constraint symbols are never picked. Two picks
 are mirrored about a third (a straight line, an axis or a point): two points as they are; two lines by their ends
 (each end with the other line's end nearest its mirror image); two circles or arcs by their centres, with equal
-radii. No Qt here: picks are tuples, ('point', geo, pos) or ('edge', geo); the axes are geo -1 (X) and -2 (Y), the
-origin ('point', -1, 1), as FreeCAD numbers them."""
+radii. Projected edges count like the sketch's own (the user's law: construction, normal or projected, a tool takes
+them all); they stay where they are, so one of a pair must be the sketch's own. No Qt here: picks are tuples,
+('point', geo, pos) or ('edge', geo); the axes are geo -1 (X) and -2 (Y), projected edges -3 down, the origin
+('point', -1, 1), as FreeCAD numbers them."""
 import FreeCAD as App
 import Part
 import Sketcher
@@ -15,17 +17,33 @@ ROUND = ("Part::GeomCircle", "Part::GeomArcOfCircle")
 LINE = "Part::GeomLineSegment"
 
 
+def geometry(sk, geo):
+    """The geometry of a Sketcher id: the sketch's own from 0 up, the axes -1 and -2, projected edges -3 down."""
+    return sk.Geometry[geo] if geo >= 0 else sk.ExternalGeo[-geo - 1]
+
+
+def ids(sk):
+    """Every geometry id that can be picked: the sketch's own, then the projected edges (not the axes)."""
+    return list(range(sk.GeometryCount)) + [-1 - k for k in range(2, len(sk.ExternalGeo))]
+
+
 def _point(sk, geo, pos):
     if (geo, pos) == (-1, 1):
         return App.Vector(0, 0, 0)
-    return App.Vector(sk.getPoint(geo, pos))
+    if geo >= 0:
+        return App.Vector(sk.getPoint(geo, pos))
+    g = geometry(sk, geo)  # a projected edge, read off its geometry
+    if pos == 3 or g.TypeId == "Part::GeomPoint":
+        return App.Vector(g.Center if pos == 3 else (g.X, g.Y, g.Z))
+    return App.Vector(g.StartPoint if pos == 1 else g.EndPoint)
 
 
 def vertices(sk):
     """[((geo, pos), point)]: every line's and arc's ends, circles' and arcs' centres, the sketch's points, the
-    origin; normal and construction geometry alike (a centreline is often construction)."""
+    origin; normal, construction and projected geometry alike (a centreline is often construction)."""
     out = [((-1, 1), App.Vector(0, 0, 0))]
-    for g, geom in enumerate(sk.Geometry):
+    for g in ids(sk):
+        geom = geometry(sk, g)
         t = geom.TypeId
         if t == "Part::GeomPoint":
             out.append(((g, 1), _point(sk, g, 1)))
@@ -46,15 +64,19 @@ def pick_at(sk, pt, vertex_tol, edge_tol):
     an axis within edge_tol, else None."""
     pt = App.Vector(pt.x, pt.y, 0)
     best, best_d = None, vertex_tol
-    for (g, pos), p in vertices(sk):
+    for (g, pos), p in (vertices(sk) if vertex_tol > 0 else ()):  # a zero tolerance looks for none (a point exactly
+        # on a line took the line for a point, and snap_at failed: IndexError, the finder)
         d = (p - pt).Length
         if d <= best_d:
             best, best_d = ("point", g, pos), d
     if best is not None:
         return best
+    if edge_tol <= 0:
+        return None
     probe = Part.Vertex(pt)
     best_d = edge_tol
-    for g, geom in enumerate(sk.Geometry):
+    for g in ids(sk):
+        geom = geometry(sk, g)
         if geom.TypeId == "Part::GeomPoint":
             continue
         try:
@@ -71,6 +93,46 @@ def pick_at(sk, pt, vertex_tol, edge_tol):
     return best
 
 
+def snap_at(sk, pt, tol):
+    """(point, pick) for a point placed at pt by a drawing tool: onto a point of the sketch within tol (normal,
+    construction or projected; the origin), else onto a line or curve within tol (the nearest place on it), else
+    (pt, None). The pick says what to tie the new point to (Coincident / PointOnObject)."""
+    pt = App.Vector(pt.x, pt.y, 0)
+    pick = pick_at(sk, pt, tol, 0.0)
+    if pick is not None:
+        return _point(sk, pick[1], pick[2]), pick
+    pick = pick_at(sk, pt, 0.0, tol)
+    if pick is None:
+        return pt, None
+    g = pick[1]
+    if g in (H_AXIS, V_AXIS):
+        return (App.Vector(pt.x, 0, 0) if g == H_AXIS else App.Vector(0, pt.y, 0)), pick
+    try:
+        on = geometry(sk, g).toShape().distToShape(Part.Vertex(pt))[1][0][0]
+        return App.Vector(on.x, on.y, 0), pick
+    except Exception:
+        return pt, None
+
+
+def tie_point(sk, geo, pos, pick):
+    """Tie the point (geo, pos) to what snap_at found; kept only when the sketch still solves. True when tied."""
+    if pick is None:
+        return False
+    if pick[0] == "point":
+        c = Sketcher.Constraint("Coincident", geo, pos, pick[1], pick[2])
+    else:
+        c = Sketcher.Constraint("PointOnObject", geo, pos, pick[1])
+    try:
+        i = sk.addConstraint(c)
+    except Exception:
+        return False
+    if sk.solve() != 0:
+        sk.delConstraint(i)
+        sk.solve()
+        return False
+    return True
+
+
 def kind(sk, pick):
     """'point', 'line' (a line segment or an axis), 'round' (circle, arc) or 'other' (a spline…)."""
     if pick[0] == "point":
@@ -78,14 +140,17 @@ def kind(sk, pick):
     g = pick[1]
     if g in (H_AXIS, V_AXIS):
         return "line"
-    t = sk.Geometry[g].TypeId
+    t = geometry(sk, g).TypeId
     return "line" if t == LINE else "round" if t in ROUND else "other"
 
 
 def subname(sk, pick):
     """FreeCAD's selection name of a pick (to show it selected)."""
     if pick[0] == "edge":
-        return {H_AXIS: "H_Axis", V_AXIS: "V_Axis"}.get(pick[1], "Edge%d" % (pick[1] + 1))
+        g = pick[1]
+        return {H_AXIS: "H_Axis", V_AXIS: "V_Axis"}.get(g, "Edge%d" % (g + 1) if g >= 0 else "ExternalEdge%d" % (-g - 2))
+    if pick[1] < -2:
+        return None  # a projected edge's point has no selection name
     if pick == ROOT:
         return "RootPoint"
     for n in range(sk.GeometryCount * 3 + 4):
@@ -107,6 +172,8 @@ def from_subname(sk, sub):
         return ROOT
     if sub.startswith("Edge"):
         return ("edge", int(sub[4:]) - 1)
+    if sub.startswith("ExternalEdge"):
+        return ("edge", -int(sub[12:]) - 2)
     if sub.startswith("Vertex"):
         geo, pos = sk.getGeoVertexIndex(int(sub[6:]) - 1)
         return ("point", geo, int(pos))
@@ -143,11 +210,13 @@ def ties(sk, a, b, sym):
         raise ValueError("Pick two different things to mirror")
     if sym in (a, b):
         raise ValueError("The mirror line can't be one of the two things mirrored")
+    if a[1] < -2 and b[1] < -2:
+        raise ValueError("Both are projected and can't move: pick one of the sketch's own")
     s = _sym_args(sym)
     if ka == kb == "point":
         return [Sketcher.Constraint("Symmetric", a[1], a[2], b[1], b[2], *s)]
     if ka == kb == "line":
-        if a[1] < 0 or b[1] < 0:
+        if a[1] in (H_AXIS, V_AXIS) or b[1] in (H_AXIS, V_AXIS):
             raise ValueError("The X and Y axes can't be mirrored: pick them as the mirror line")
         ends_b = [(pos, _point(sk, b[1], pos)) for pos in (1, 2)]
         m1 = _mirror(sk, sym, _point(sk, a[1], 1))

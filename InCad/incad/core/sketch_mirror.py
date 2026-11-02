@@ -30,7 +30,7 @@ def _reflector(sk, axis):
 
 def _copy(sk, g, reflect, reverses):
     """(mirrored geometry, {original pos: copy pos}) of geometry g."""
-    geom = sk.Geometry[g]
+    geom = sym.geometry(sk, g)  # (a projected edge mirrored too)
     t = geom.TypeId
     if t == "Part::GeomLineSegment":
         return Part.LineSegment(reflect(geom.StartPoint), reflect(geom.EndPoint)), {1: 1, 2: 2}
@@ -76,7 +76,7 @@ def mirror(sk, geos, axis):
         else:
             sk.addConstraint(Sketcher.Constraint("Symmetric", g, opos, c, cpos, *s))
     for g, (geom, posmap) in made:
-        c = sk.addGeometry(geom, bool(sk.getConstruction(g)))
+        c = sk.addGeometry(geom, bool(g >= 0 and sk.getConstruction(g)))  # a projected edge's copy: normal
         new.append(c)
         t = geom.TypeId
         if t in ("Part::GeomCircle",):

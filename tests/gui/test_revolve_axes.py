@@ -11,7 +11,7 @@ import FreeCADGui as Gui  # noqa: E402
 import Part  # noqa: E402
 import Sketcher  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
-from incad.qt import QtCore, QtWidgets  # noqa: E402
+from incad.qt import QtCore, QtWidgets, viewport_of  # noqa: E402
 from incad.core import commands, document, prefs  # noqa: E402
 from incad.features import revolve  # noqa: E402
 from incad.ui import shell  # noqa: E402
@@ -94,7 +94,8 @@ def test_0_setup():
 def test_1_construction_lines_listed_sketch_axis_default_with_two():
     open_revolve(ST["sk"])
     w = dialog().field("axis_construction")
-    assert [w.itemData(i) for i in range(w.count())] == ["Axis0", "Axis1"], [w.itemData(i) for i in range(w.count())]
+    items = [w.itemData(i) for i in range(w.count())]  # construction lines first, then the profile's own lines
+    assert items[:2] == ["Axis0", "Axis1"] and all(x.startswith("Line") for x in items[2:]), items  # (the law)
     assert "vertical" in w.itemText(0) and "horizontal" in w.itemText(1), (w.itemText(0), w.itemText(1))
     assert dialog().values()["axis_mode"] == "V_Axis"
     assert not dialog().field("axis_construction").isVisible()
@@ -139,7 +140,7 @@ def test_3_two_points_on_the_markers_make_a_hidden_axis_under_the_revolve():
     assert pick is not None and len(pick.points) >= 8, pick and len(pick.points)
     # two corners of the pad on its x = 40 end, one above the other: a vertical axis beside the profile
     view = Gui.ActiveDocument.ActiveView
-    vp = view.graphicsView().viewport()
+    vp = viewport_of(view)
     dpr = vp.devicePixelRatioF()
     wanted = [App.Vector(40, 0, 0), App.Vector(40, 0, 20)]
     for p in wanted:

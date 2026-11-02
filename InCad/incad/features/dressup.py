@@ -162,21 +162,89 @@ CHAMFER = SimpleNamespace(
 
 # ----- Shell -----
 def _shell_apply(doc, f, values):
-    obj, subs = _base(doc, values.get("faces"), _expected(f))
-    f.Base = (obj, subs)
+    if values.get("closed"):  # no face removed: a closed hollow (InCad's own Shell; FreeCAD's Thickness can't)
+        if SHELL_MARK not in f.PropertiesList:
+            raise ValueError("This older Shell can't be made closed: delete it and make a new one")
+        f.Base = None
+    else:
+        obj, subs = _base(doc, values.get("faces"), _expected(f))
+        f.Base = (obj, subs)
     f.Reversed = values.get("direction", "inside") == "inside"  # probed: Reversed=True keeps the outer size
     value_param(doc, f, "Value", values.get("thickness") or "1 mm", "length")
 
 
+SHELL_MARK = "InCadShell"  # on InCad's own Shell (a PartDesign::FeaturePython): how its last wall was made
+
+
+class ShellFeature:
+    """InCad's Shell on OpenCASCADE (incad.core.shell_solid): FreeCAD's Thickness properties (Base, Value, Reversed)
+    so the dialog reads and writes it the same way, and the ways OCC can hollow a part tried in turn. The proxy;
+    FreeCAD saves its module path and class name in the file."""
+    def __init__(self, obj):
+        for name, kind, doc in (("Base", "App::PropertyLinkSub", "The faces removed (none: a closed hollow)"),
+                                ("Value", "App::PropertyLength", "The wall thickness"),
+                                ("Reversed", "App::PropertyBool", "Inside: the outer size stays"),
+                                (SHELL_MARK, "App::PropertyString", "How the wall was made")):
+            if name not in obj.PropertiesList:
+                obj.addProperty(kind, name, "Shell", doc)
+        obj.setPropertyStatus(SHELL_MARK, "Hidden")
+        obj.Proxy = self
+
+    def execute(self, obj):
+        from incad.core import shell_solid
+        base = obj.BaseFeature
+        if base is None or base.Shape.isNull():
+            return
+        link = obj.Base
+        faces = []
+        if link and link[0] is not None:
+            src = link[0].Shape
+            for sub in link[1]:
+                try:
+                    faces.append(src.getElement(sub))
+                except Exception:
+                    raise ValueError("A removed face (%s) is no longer on the part: pick the faces again" % sub)
+        try:
+            shape, how = shell_solid.make(base.Shape, faces, obj.Value.Value, bool(obj.Reversed))
+        except ValueError:
+            if _has_thread(base):
+                raise ValueError("ProstoCAD can't hollow a part with a modeled thread in it: make the Shell before the "
+                                 "thread (drag End of Part above the thread, make the Shell there, then move End of "
+                                 "Part back)")
+            raise
+        setattr(obj, SHELL_MARK, how)
+        obj.Shape = shape
+
+    def dumps(self):
+        return None
+
+    def loads(self, state):
+        return None
+
+
+def _has_thread(feature):
+    from incad.core import safe
+    return safe._has_modeled_thread(feature)
+
+
 def _shell_create(doc, body, profile, values):
-    f = body.newObject("PartDesign::Thickness", "Shell")
+    from incad.core import document
+    tip = body.Tip
+    f = body.newObject("PartDesign::FeaturePython", "Shell")
+    f.Label = "Shell"
+    ShellFeature(f)
+    f.BaseFeature = tip
+    body.Tip = f
+    document.show_like(f, tip)
     _shell_apply(doc, f, values)
     return f
 
 
 def _shell_read(doc, f):
-    return {"faces": _picks_text(f), "thickness": value_text(doc, f, "Value") or "1 mm",
-            "direction": "inside" if f.Reversed else "outside"}
+    faces = _picks_text(f)
+    return {"faces": faces, "thickness": value_text(doc, f, "Value") or "1 mm",
+            "direction": "inside" if f.Reversed else "outside",
+            "closed": SHELL_MARK in f.PropertiesList and not faces}
 
 
 def _shell_update(doc, f, values):
@@ -321,12 +389,15 @@ def _shell_rescue(doc, body, values, error):
 
 
 SHELL = SimpleNamespace(
-    __name__="incad.features.shell", TITLE="Shell", ICON="shell", TYPES=("PartDesign::Thickness",), rescue=_shell_rescue,
-    claims=lambda f: not getattr(f, "InCadHelperOf", None),  # a Sweep's wall is edited from its Sweep
+    __name__="incad.features.shell", TITLE="Shell", ICON="shell", TYPES=("PartDesign::Thickness", "PartDesign::FeaturePython"),
+    rescue=_shell_rescue,
+    claims=lambda f: not getattr(f, "InCadHelperOf", None) and (  # a Sweep's wall is edited from its Sweep
+        f.TypeId == "PartDesign::Thickness" or SHELL_MARK in f.PropertiesList),
     NEEDS_PROFILE=False, PROPS={"thickness": "Value"}, PRESELECT={"faces": "face"}, SOLID_PICKS=True,
     PREVIEW_WHILE_PICKING=True,  # the hollow part shows while faces are picked; a click on it means the part's face
-    FIELDS=(Field("faces", "Remove faces", "picks", pick="face"),
+    FIELDS=(Field("closed", "No opening", "bool", default=False),  # a closed hollow (Inventor; Thickness can't)
+            Field("faces", "Remove faces", "picks", pick="face", show_if=("closed", (False,))),
             Field("thickness", "Thickness", "value_length", default="1 mm"),
             Field("direction", "Direction", "choice", (("inside", "Inside"), ("outside", "Outside")), "inside")),
-    defaults=lambda doc, body, profile: {"faces": "", "thickness": "1 mm", "direction": "inside"},
+    defaults=lambda doc, body, profile: {"closed": False, "faces": "", "thickness": "1 mm", "direction": "inside"},
     create=_shell_create, read=_shell_read, update=_shell_update, _pad_of=lambda f: f)

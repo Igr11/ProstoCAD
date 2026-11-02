@@ -284,3 +284,17 @@ class ChangingValuesTest(unittest.TestCase):
         self.assertIn("P2", self.touched())  # b follows a: P2 uses b
         self.doc.recompute()
         self.assertAlmostEqual(self.p2.Length.Value, 4.0)
+
+
+class RawMessagesTest(unittest.TestCase):
+    """FreeCAD's and OpenCASCADE's own words were shown as they are (the finder's list)."""
+
+    def test_raw_kernel_words_come_out_plain(self):
+        for raw, part in (("Extrusion: end face of tapered extrusion is empty", "taper closes"),
+                          ("Linked shape object is empty", "nothing to use"),
+                          ("SketchBased: No faces found in this direction", "To Next"),
+                          ("Sweep: Geom_RectangularTrimmedSurface::V1==V2", "closed outline"),
+                          ("Error: height too small!", "height above zero")):
+            self.assertIn(part, model.friendly(raw), raw)
+        self.assertIn("couldn't be made", model.friendly("BRepOffsetAPI_MakeOffsetShape not done",
+                                                         "PartDesign::Fillet"))

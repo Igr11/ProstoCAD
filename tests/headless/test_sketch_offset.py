@@ -25,7 +25,8 @@ def polyline(sk, pts, closed=True):
 class Base(unittest.TestCase):
     def setUp(self):
         self.doc = util.new_doc("SkOffset")
-        body, _ = util.padded_part(self.doc, 5)
+        self.body, _ = util.padded_part(self.doc, 5)
+        body = self.body
         self.sk = body.newObject("Sketcher::SketchObject", "Sk")
         self.sk.AttachmentSupport = [(util.xy_plane(body), "")]
         self.sk.MapMode = "FlatFace"
@@ -59,11 +60,44 @@ class Outline(Base):
         self.assertEqual(so.outline(self.sk, c), ([c], True))
         self.assertEqual(so.outline(self.sk, e), ([e], True))
 
-    def test_construction_and_external_are_refused(self):
-        g = self.sk.addGeometry(Part.LineSegment(V(0, 0, 0), V(5, 0, 0)), True)
-        with self.assertRaises(ValueError) as e:
-            so.outline(self.sk, g)
-        self.assertEqual(str(e.exception), so.PICK_MSG)
+    def test_normal_and_construction_lines_make_one_outline(self):
+        """The user's law: normal and construction lines have equal rights; each copy keeps its original's kind.
+        A point never takes part in Offset (another law), not even one on a corner."""
+        box = polyline(self.sk, [V(0, 0, 0), V(10, 0, 0), V(10, 6, 0), V(0, 6, 0)])
+        for g in box[:2]:
+            self.sk.setConstruction(g, True)
+        dot = self.sk.addGeometry(Part.Point(V(10, 0, 0)))
+        chain, closed = so.outline(self.sk, box[3])
+        self.assertEqual((sorted(chain), closed), (sorted(box), True))
+        with self.assertRaises(ValueError):
+            so.outline(self.sk, dot)
+        ids, _ = so.add(self.sk, chain, closed, V(5, -2, 0))
+        self.assertEqual(len(ids), 4)
+        kinds = {o: self.sk.getConstruction(o) for o in chain}
+        self.assertEqual(sorted(self.sk.getConstruction(c) for c in ids), sorted(kinds.values()))
+
+    def test_a_small_circle_is_offset_inside_without_crashing(self):
+        """OCC's 2D offset brought the whole program down for a circle of radius 1 mm or less offset inward."""
+        c = self.sk.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), 1))
+        ids, _ = so.add(self.sk, [c], True, V(0.1, 0, 0), 0.3)
+        self.assertAlmostEqual(self.sk.Geometry[ids[0]].Radius, 0.7, 6)
+
+    def test_a_construction_diagonal_does_not_bend_the_outline(self):
+        """A construction diagonal drawn before the rectangle: a click on a side gave a triangle."""
+        self.sk.addGeometry(Part.LineSegment(V(0, 0, 0), V(10, 6, 0)), True)
+        box = polyline(self.sk, [V(0, 0, 0), V(10, 0, 0), V(10, 6, 0), V(0, 6, 0)])
+        chain, closed = so.outline(self.sk, box[0])
+        self.assertEqual((sorted(chain), closed), (sorted(box), True))
+
+    def test_a_projected_outline_is_taken_too(self):
+        """The user's law: projected edges have equal rights - the part's top outline, projected, is offset."""
+        top = [i + 1 for i, e in enumerate(self.body.Tip.Shape.Edges) if abs(e.BoundBox.ZMin - 5) < 1e-6
+               and abs(e.BoundBox.ZMax - 5) < 1e-6]
+        for i in top:
+            self.sk.addExternal(self.body.Tip.Name, "Edge%d" % i)
+        self.sk.Document.recompute()
+        chain, closed = so.outline(self.sk, -3)
+        self.assertEqual((len(chain), closed), (4, True))
 
 
 class Offsets(Base):

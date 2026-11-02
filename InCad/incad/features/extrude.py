@@ -89,6 +89,69 @@ def _apply(doc, f, values):
     if direction == "two_sides":
         value_param(doc, f, "Length2", values.get("distance2") or "5 mm", "length")
     value_param(doc, f, "TaperAngle", values.get("taper") or "0 °", "angle")
+    _tapered_through(f, extent == "through_all" and _angle(values.get("taper")) != 0)
+
+
+REACH = "InCadThroughAllReach"  # on a tapered Through All: its length is the part's reach (see _tapered_through)
+
+
+def _angle(text):
+    try:
+        return App.Units.Quantity((text or "0 °").replace("°", " deg")).Value
+    except Exception:
+        return 1.0  # a formula: taken as tapered
+
+
+def _reach(f):
+    """How far the part reaches from the profile's plane, either way, plus 1 mm (a Through All's length)."""
+    base = f.BaseFeature.Shape if f.BaseFeature is not None else None
+    prof = f.Profile[0] if isinstance(f.Profile, (tuple, list)) and f.Profile else f.Profile
+    if base is None or base.isNull() or prof is None:
+        return None
+    pl = prof.getGlobalPlacement()
+    n = pl.Rotation.multVec(App.Vector(0, 0, 1))
+    bb = base.BoundBox
+    corners = [App.Vector(x, y, z) for x in (bb.XMin, bb.XMax) for y in (bb.YMin, bb.YMax) for z in (bb.ZMin, bb.ZMax)]
+    return max(abs((c - pl.Base).dot(n)) for c in corners) + 1.0
+
+
+def _tapered_through(f, on):
+    """Through All with a taper: FreeCAD's Through All runs the length of the whole box's diagonal, and an inward
+    taper closed the profile long before (refused: "values too large", the finder). It is a length just past the
+    part instead, measured again when the part changes (follow_reach)."""
+    if not on:
+        if REACH in f.PropertiesList:
+            f.removeProperty(REACH)
+        return
+    reach = _reach(f)
+    if reach is None:
+        return
+    if REACH not in f.PropertiesList:
+        f.addProperty("App::PropertyBool", REACH, "InCad", "Through All with a taper: the length reaches past the part")
+        f.setPropertyStatus(REACH, "Hidden")
+    setattr(f, REACH, True)
+    f.Type = "Length"
+    f.setExpression("Length", None)
+    f.Length = reach
+
+
+def follow_reach(doc):
+    """After a recompute (incad.ui.shell): tapered Through All extrudes reach past the part as it is now."""
+    from incad.core import safe
+    todo = []
+    for f in doc.Objects:
+        if REACH in getattr(f, "PropertiesList", ()):
+            reach = _reach(f)
+            if reach is not None and abs(reach - f.Length.Value) > 1e-6:
+                todo.append((f, reach))
+    if not todo:
+        return []
+
+    def go():
+        for f, reach in todo:
+            f.Length = reach
+    r = safe.run_safely("Through All follows the part", go, doc)
+    return [f.Label for f, _ in todo] if r.ok else []
 
 
 def _helper(doc, f, role, type_id, label):
@@ -234,6 +297,18 @@ def _material_only_behind(f):
     return not hits(n) and hits(-n)
 
 
+def _touches(f):
+    """Does the extruded shape touch or overlap the material before it?"""
+    base = f.BaseFeature.Shape if f.BaseFeature is not None else None
+    if base is None or base.isNull() or not base.Solids:
+        return False
+    try:
+        tool = f.AddSubShape
+        return not tool.isNull() and tool.BoundBox.intersect(base.BoundBox) and tool.distToShape(base)[0] < 1e-6
+    except Exception:
+        return False
+
+
 def _solids(feature):
     try:
         shape = feature.Shape
@@ -256,7 +331,11 @@ def create(doc, body, profile, values):
     _apply(doc, f, values)
     if operation == "join" and before:
         doc.recompute()
-        if _solids(f) > before:  # the new solid does not touch the part: a piece of its own, not a second
+        if _solids(f) > before and _touches(f):  # some of it joins the part: it stays a Join (one profile on the part,
+            from incad.core import log           # one beside it went into a new Solid of two lumps before)
+            log.report("warning", "%s: a shape of its profile doesn't touch the part: it stays a separate lump in "
+                       "the Solid (move it onto the part, or extrude it as a New Solid)" % f.Label)
+        elif _solids(f) > before:  # the new solid does not touch the part: a piece of its own, not a second
             _drop_helpers(doc, f)   # lump in the part's body (nothing could be shelled or filleted there)
             target.removeObject(f)
             doc.removeObject(f.Name)
@@ -298,6 +377,8 @@ def read(doc, feature):
         operation = "new_solid"
     extent = {"Length": "distance", "UpToFirst": "to_next", "UpToFace": "to", "ThroughAll": "through_all",
               "UpToLast": "through_all"}.get(f.Type, "distance")
+    if getattr(f, REACH, False):
+        extent = "through_all"
     direction = {"Symmetric": "symmetric", "Two sides": "two_sides"}.get(f.SideType, "flip" if f.Reversed else "default")
     def picked(prop, link):
         if getattr(f, prop, ""):
@@ -321,6 +402,11 @@ def update(doc, feature, values):
     is_boolean = feature.TypeId == "PartDesign::Boolean"  # decided first: a replaced Pad no longer exists
     f = _pad_of(feature)
     wanted = values.get("operation", "join")
+    own = f.getParentGeoFeatureGroup() is not document.primary_body(doc)
+    if wanted in ("join", "cut") and (is_boolean or own) and read(doc, feature)["operation"] != wanted:
+        raise ValueError("This extrude is a Solid of its own (New Solid or Intersect): it can't turn into a %s of "
+                         "the part here. Join or cut it with Boolean, or delete it and "
+                         "extrude again" % ("Join" if wanted == "join" else "Cut"))
     if wanted in ("join", "cut") and f.TypeId != _feature_type(wanted) and not is_boolean:
         f = _replace(doc, f, _feature_type(wanted))
     _apply(doc, f, values)

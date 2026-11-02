@@ -6,6 +6,7 @@ import Part
 
 from incad import host
 from incad.core import log, safe, sketch_offset as so
+from incad.qt import viewport_of
 
 PICK_PX = 8  # logical px around the pointer that count as a click on an edge
 PROMPT_PICK = "Click a shape to offset (%s-click adds another; Esc cancels)" % host.ADD_KEY
@@ -63,7 +64,7 @@ class OffsetTool:
     def _tolerance(self, x, y):
         """PICK_PX in sketch mm at this spot."""
         try:
-            dpr = self.view.graphicsView().viewport().devicePixelRatioF()
+            dpr = viewport_of(self.view).devicePixelRatioF()
         except Exception:
             dpr = 1.0
         a, b = self.to_sketch(x, y), self.to_sketch(x + PICK_PX * dpr, y)
@@ -96,14 +97,14 @@ class OffsetTool:
             self.hover(pt)
 
     def nearest(self, pt, tol):
-        """The sketch's normal geometry nearest the point, within tol, or None."""
+        """The sketch's geometry (construction too) nearest the point, within tol, or None."""
         probe = Part.Vertex(pt)
         best, best_d = None, tol
-        for g in range(self.sketch.GeometryCount):
+        for g in so._ids(self.sketch):  # projected edges too (the user's law)
             if not so._usable(self.sketch, g):
                 continue
             try:
-                d = self.sketch.Geometry[g].toShape().distToShape(probe)[0]
+                d = so._geo(self.sketch, g).toShape().distToShape(probe)[0]
             except Exception:
                 continue
             if d <= best_d:

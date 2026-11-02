@@ -97,7 +97,8 @@ def test_2_break_mirror_link_on_the_copy_only():
     assert "Break Mirror Link" in labels, labels
     dict((label, fn) for label, _i, fn in items)["Break Mirror Link"]()
     harness.pump(800)
-    assert "Symmetric" not in [c.Type for c in sk().Constraints]
+    # no mirror tie (Symmetric about the Y axis) is left; a rectangle's own centre point keeps its Symmetric
+    assert not [c for c in sk().Constraints if c.Type == "Symmetric" and c.Third == -2]
     sk().setDatum(ST["w"], App.Units.Quantity("18 mm"))
     App.ActiveDocument.recompute()
     harness.pump(500)
@@ -106,11 +107,23 @@ def test_2_break_mirror_link_on_the_copy_only():
     assert sk().solve() == 0
 
 
-def test_3_nothing_selected_says_how():
+def test_3_tool_first_then_the_shape_then_the_line():
+    """The user's law: the tool first, then the clicks. Nothing selected: Mirror, a click on one side of the rectangle
+    takes it whole, a click on the Y axis makes the copy."""
+    k = sk()
+    count = k.GeometryCount
     Gui.Selection.clearSelection()
     r = commands.REGISTRY.run("sketch.mirror")
-    harness.pump(300)
-    assert not r.ok and "select the shapes" in r.error.lower(), r.error
+    harness.pump(400)
+    assert r.ok and s().slot_tool is not None, r.error
+    side = k.Geometry[ST["ids"][0]]
+    _click_at((side.StartPoint + side.EndPoint) * 0.5)
+    assert k.GeometryCount == count, "a click on a shape only takes it"
+    assert sorted(s().slot_tool.geos) == sorted(ST["ids"]), s().slot_tool.geos
+    _click_at(V(0, 40, 0))  # the Y axis, clear of everything
+    assert k.GeometryCount == count + 4, k.GeometryCount
+    assert k.solve() == 0
+    assert s().slot_tool is None
 
 
 def _click_at(p):
@@ -214,6 +227,6 @@ def test_9_cleanup():
 
 
 harness.run([test_0_rectangle, test_1_mirror_without_dimensions, test_2_break_mirror_link_on_the_copy_only,
-             test_3_nothing_selected_says_how, test_4_select_mirror_then_click_the_line,
+             test_3_tool_first_then_the_shape_then_the_line, test_4_select_mirror_then_click_the_line,
              test_5_select_mirror_then_click_the_y_axis, test_6_shift_click_selects_the_whole_shape_at_once,
              test_9_cleanup])

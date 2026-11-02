@@ -11,6 +11,12 @@ _ARC, _CIRCLE, _LINE = "Part::GeomArcOfCircle", "Part::GeomCircle", "Part::GeomL
 ROUND = (_ARC, _CIRCLE)
 
 
+def geometry(sk, g):
+    """The geometry of a Sketcher id: the sketch's own from 0 up, projected edges -3 down (the user's law: a tool takes
+    normal, construction and projected geometry alike)."""
+    return sk.Geometry[g] if g >= 0 else sk.ExternalGeo[-g - 1]
+
+
 def _state(sk):
     sk.solve()
     return sk.DoF, set(sk.ConflictingConstraints), set(sk.RedundantConstraints), set(sk.MalformedConstraints)
@@ -68,18 +74,18 @@ def _slots(sk, ids):
 
 def slot_of(sk, g):
     """The two arcs of the slot that geometry `g` (one of its arcs or sides) belongs to, or None."""
-    ids = [i for i in range(sk.GeometryCount) if not sk.getConstruction(i)]
+    ids = list(range(sk.GeometryCount))
     return next(((a, b) for a, b, l1, l2 in _slots(sk, ids) if g in (a, b, l1, l2)), None)
 
 
 def overall(sk, a, b):
     """Add the overall dimension between round geometry `a` and `b` (arcs or circles); returns its index. Driving
     when the sketch takes it, else a reference."""
-    geo = sk.Geometry
-    if geo[a].TypeId not in ROUND or geo[b].TypeId not in ROUND or a == b:
+    ga, gb = geometry(sk, a), geometry(sk, b)
+    if ga.TypeId not in ROUND or gb.TypeId not in ROUND or a == b:
         raise ValueError("Pick two arcs or circles (or one edge of a slot)")
-    c1, c2 = App.Vector(geo[a].Center), App.Vector(geo[b].Center)
-    r1, r2 = geo[a].Radius, geo[b].Radius
+    c1, c2 = App.Vector(ga.Center), App.Vector(gb.Center)
+    r1, r2 = ga.Radius, gb.Radius
     u = c2 - c1
     if u.Length < 1e-7:
         raise ValueError("These two are concentric: dimension their diameters instead")
@@ -110,8 +116,9 @@ def ends_of(sk, index):
         return None
 
     def round_of(p):
-        return [k.Second for k in cons if k.Type == "PointOnObject" and k.First == p and k.Second >= 0
-                and geo[k.Second].TypeId in ROUND]
+        return [k.Second for k in cons if k.Type == "PointOnObject" and k.First == p
+                and (k.Second >= 0 or -len(sk.ExternalGeo) <= k.Second <= -3)
+                and geometry(sk, k.Second).TypeId in ROUND]
     a, b = round_of(c.First), round_of(c.Second)
     return (a[0], b[0]) if len(a) == 1 and len(b) == 1 else None
 
@@ -124,7 +131,7 @@ def hold_radii(sk, index):
     if not ends:
         return []
     held = []
-    for g in dict.fromkeys(ends):
+    for g in dict.fromkeys(g for g in ends if g >= 0):  # a projected one can't change its radius anyway
         if _try(sk, [], lambda ids, g=g: [Sketcher.Constraint("Radius", g, sk.Geometry[g].Radius)], 1):
             held.append(sk.ConstraintCount - 1)
     return held
@@ -143,16 +150,20 @@ KINDS = (("centers", "Centers"), ("overall", "Overall"), ("gap", "Gap"))  # a di
 def kind_of(sk, index):
     """(kind, a, b) when dimension `index` is a distance between two arcs / circles: 'centers' (centre to centre),
     'overall' (outer edges, see overall()) or 'gap' (inner edges: FreeCAD's Dimension on two arcs); else None."""
-    cons, geo = sk.Constraints, sk.Geometry
+    cons = sk.Constraints
     if not 0 <= index < len(cons) or cons[index].Type != "Distance":
         return None
     ends = ends_of(sk, index)
     if ends:
         return ("overall",) + tuple(ends)
     c = cons[index]
-    if c.First < 0 or c.Second < 0 or geo[c.First].TypeId not in ROUND or geo[c.Second].TypeId not in ROUND:
+    try:
+        ga, gb = geometry(sk, c.First), geometry(sk, c.Second)
+    except (IndexError, ValueError):
         return None
-    if (App.Vector(geo[c.First].Center) - App.Vector(geo[c.Second].Center)).Length < 1e-7:
+    if c.First in (-1, -2) or c.Second in (-1, -2) or ga.TypeId not in ROUND or gb.TypeId not in ROUND:
+        return None
+    if (App.Vector(ga.Center) - App.Vector(gb.Center)).Length < 1e-7:
         return None  # concentric (an Offset's copy): no centres to measure between, no overall length
     if c.FirstPos == 3 and c.SecondPos == 3:
         return "centers", c.First, c.Second
@@ -162,10 +173,9 @@ def kind_of(sk, index):
 
 
 def _measure(sk, kind, a, b):
-    geo = sk.Geometry
-    d = (App.Vector(geo[b].Center) - App.Vector(geo[a].Center)).Length
-    return {"centers": d, "overall": d + geo[a].Radius + geo[b].Radius,
-            "gap": d - geo[a].Radius - geo[b].Radius}[kind]
+    ga, gb = geometry(sk, a), geometry(sk, b)
+    d = (App.Vector(gb.Center) - App.Vector(ga.Center)).Length
+    return {"centers": d, "overall": d + ga.Radius + gb.Radius, "gap": d - ga.Radius - gb.Radius}[kind]
 
 
 def set_kind(sk, index, kind):

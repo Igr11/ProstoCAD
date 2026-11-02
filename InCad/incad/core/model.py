@@ -26,6 +26,29 @@ _KERNEL_FAILURE = {
 }
 
 
+_RAW = (
+    ("end face of tapered extrusion is empty",
+     "The taper closes the profile before the end: use a smaller angle or a shorter distance"),
+    ("Linked shape object is empty",
+     "The sketch has nothing to use: it is empty, or all its lines are construction"),
+    ("No faces found in this direction",
+     "Nothing of the part lies ahead for To Next: turn the direction round, or give a distance"),
+    ("Up to face: Failed to extract face",
+     "The face it goes up to is gone (the part changed): pick the face again"),
+    ("V1==V2", "The profile must be a closed outline: a single line can't be swept into a solid"),
+    ("result of offsetting is null", "The wall is as thick as the profile, or thicker: make it thinner"),
+    ("height too small", "Give the coil a height above zero"),
+    ("Pitch too small", "Give the coil a pitch above zero"),
+    ("Invalid edge link", "An edge it was on is gone after the change: edit it and pick the edges again"),
+    ("Invalid face link", "A face it was on is gone after the change: edit it and pick the faces again"),
+    ("Must not intersect sketch", "What it goes to lies in the sketch's own plane: pick a face or point off it"),
+    ("cannot determine type of null shape",
+     "The shape can't be built on this face (a free-form face): try a flat or round face, or a smaller depth"),
+    ("Unsupported geometry type to get reference axis",
+     "Pick a straight line, an edge or an axis for the axis (a round face is not taken)"),
+)
+
+
 def friendly(message, type_id=None):
     """FreeCAD's expression errors in plain words (no internal paths). type_id (of the feature that failed) lets a
     kernel failure be explained for that feature instead of as a revolve."""
@@ -45,7 +68,11 @@ def friendly(message, type_id=None):
         return "The axis crosses the profile: choose another axis or move the profile off it"
     if "perpendicular to the sketch" in message:
         return "The axis is perpendicular to the profile: pick an axis that lies in the profile's plane"
-    if "command not done" in message or "NullObject" in message or "BRepAlgoAPI" in message:
+    for raw, said in _RAW:  # FreeCAD's and OpenCASCADE's own words, in plain ones (the finder's list)
+        if raw in message:
+            return said
+    if "command not done" in message or "NullObject" in message or "BRepAlgoAPI" in message or \
+            "BRepOffsetAPI" in message:
         if type_id is not None and type_id not in _REVOLVE_TYPES:
             return _KERNEL_FAILURE.get(type_id, "The shape couldn't be built: the values are too large for the "
                                                 "geometry, or the picks don't fit it")

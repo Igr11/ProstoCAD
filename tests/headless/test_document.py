@@ -318,6 +318,17 @@ class VisibilityTest(unittest.TestCase):
             touched = [o.Name for o in self.doc.Objects if "Touched" in o.State]
             self.assertEqual(touched, [], flag)
 
+    def test_hide_while_a_dialog_is_open_is_not_refused(self):
+        """The user's log: "Hide failed: Finish the Extrude dialog first". Hiding is only looking: done at once."""
+        from incad import actions
+        from incad.core import safe
+        safe.set_busy("Extrude")
+        try:
+            actions._visibility_step("Hide", [self.closed], lambda: document.set_visibility([self.closed], False))
+        finally:
+            safe.set_busy(None)
+        self.assertFalse(document.is_shown(self.closed))
+
     def test_hide_show_is_one_undo_step_that_undo_and_redo_follow(self):
         """FreeCAD records no Visibility change in a transaction: the choice lives in InCadShown (recorded), and
         apply_visibility puts the view back in step after undo/redo."""

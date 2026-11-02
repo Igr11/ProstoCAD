@@ -5,6 +5,49 @@ This build: VERSION
 Newest build first. The build name is the name of the zip file.
 
 
+next
+----
+Improvements
+- Shell is InCad's own, on OpenCASCADE directly: when the usual way fails, other ways are tried (intersection joins, and walls made from the part and its offset copy), so several walls open at once now work where they failed - a block with rounded or chamfered vertical edges with its top and a side open, two opposite sides open. New: No opening - a closed hollow, no face removed. A part whose shape is faulty (often an imported STEP) is said plainly instead of being offset: that could crash the program. Shells in older files stay as they are.
+- Sketch ▸ Tangent Circle works like the other sketch tools: pick it, then click the three lines, arcs or circles the circle touches (construction and projected lines and the axes too) - the third click makes the circle. Two or three selected before still make it at once.
+- Sketch tools work tool first: pick the tool, then click in the sketch. Mirror no longer needs the shapes selected before: click a shape (Cmd/Ctrl-click for more), then the mirror line.
+- Sketch tools treat normal, construction and projected lines alike: Symmetric, Mirror, Overall Dimension and Offset take all of them (an outline runs through normal and construction lines together, each copy keeps its kind; a point is never part of an Offset). The points marked on a shown sketch include construction and projected geometry, so a feature can pick a rectangle's centre.
+- Overall and Center Point Slot snap to the sketch: a click near a point or line (normal, construction or projected) lands on it and the slot is tied there.
+
+Bug fixes
+- Sketch Offset and Mirror take projected edges too (the user's law: equal rights) - a projected outline is offset or mirrored like a drawn one; a click exactly on a line no longer breaks the Slot tool's snapping; Revolve about a construction line works also when the sketch's lines cross (its area is the profile).
+- Shell with two neighbouring openings left a bar of material in their corner when the wall was more than half the inner face wide; the corner is now cut exactly.
+- Fillets, chamfers, shells and drafts lost their edges or faces when the part changed size (a Pad made higher, a sketch made wider: FreeCAD's "?Edge1") and the change was refused - the commonest edit there is. The edge or face is now found again: the one of the same kind, type and direction that sits where it sat in the part (the right-hand edge stays the right-hand one when the part gets wider) - never guessed: when none or two fit, the message says to pick it again instead of "Invalid edge link: ;#f:1;...".
+- Extrude / Revolve from a sketch whose outlines touch only at a corner (two holes corner to corner) failed or made two touching solids; such a sketch also offers its areas to click.
+- Emboss wrapped on a round face that leaves faulty edges is kept with a warning; on a free-form face it says it can't be built there instead of OpenCASCADE's words. A pattern of cuts that splits the part into strips says so (not "copies off the part").
+- Revolve's line list numbers every line by its own number, construction lines marked (two different "Line 1" before).
+- A crash of the whole program: an inward 2D offset of a circle of radius 1 mm or less (a hollow Sweep of a 2 mm tube, Sketch Offset inside a 2 mm circle) brought OpenCASCADE down; a lone circle is now offset by its radius.
+- Hole: a modeled tapped hole Through All ran its thread far past the part and took 7x as long (6.7 s against 0.9 s); it now goes just past the part, measured again when the part changes.
+- Plain words instead of FreeCAD's and OpenCASCADE's own for: a taper that closes the profile, an empty sketch, To Next with nothing ahead, a lost To face, an open sweep profile, a wall as thick as the profile, a coil with no height or pitch or a round face as its axis, an offset the kernel couldn't do; a Draft that failed now says why. A fillet or chamfer that leaves a faulty spot is kept with a warning.
+- Extrude Through All with an inward taper was refused ("values too large"): FreeCAD's Through All runs the whole box diagonal and the taper closed the profile; now it reaches just past the part, measured again when the part changes.
+- Pattern / Mirror whose copies land off the part (a boss repeated past the block's end) left separate lumps in the Solid without a word, and a later Shell or Fillet failed on them; now said at OK, the copies kept.
+- Editing an Extrude made as New Solid or Intersect and choosing Join or Cut silently did nothing; now it says why and what to do (Boolean, or extrude again).
+- Sweep with a Wall: the inner outline was copied once, so editing the profile changed the wall (0.5 mm became 1.5 mm); now the wall is made again right after the recompute.
+- Extrude Join with one shape of the profile on the part and one beside it: the whole extrude went into a new Solid made of two lumps; now it joins the part and the loose shape is pointed out.
+- Revolve with two angles adding up to more than 360° gave a thin wedge (200° + 200° came out 40°): now refused, saying so.
+- Loft said "The sections are out of order" for every failure, sending the user to reorder for nothing; now only an out-of-order set says that, other sets say the loft can't be made through them.
+- Coil whose turns touch or overlap, or whose profile crosses the axis, is kept with a warning instead of silently.
+- Hole: a hole whose edge touches a side (a wall of no thickness) gets the same warning as a cut.
+- Thread: Full length and a size chosen from the shaft were measured once. A longer shaft kept its thread over the old length; a shaft made 12 mm kept its M10 groove, without a word. Now, right after a recompute, a cut thread whose shaft changed is built again (its size chosen again; a size picked by hand that no longer fits is said).
+- Hole: To a face and Concentric measured the part once. A part made thicker left a To-the-bottom hole blind, and a boss moved left its Concentric hole off-centre, both without a word. Now, right after a recompute, the depth is measured again and the centres go where the round edges are (its own undo step).
+- Split (Keep all): editing the knife sketch outside the Split's dialog made a piece Solid take the part's own piece (the material twice) and lost a new piece without a word. Now each piece stays in one Solid: right after the recompute a Solid left without a piece goes and a new piece gets a Solid of its own.
+- A fillet or chamfer the kernel refused could spoil the feature it was built on (OpenCASCADE changes the shared edges' tolerances in place): that feature turned "Unorientable" and every next feature failed (seen after a Boolean join with a near-flush step). The feature is now computed again after such a refusal, in the dialog and on Cancel.
+- Shell on a part rounded all round (every edge filleted) did nothing without a word: the kernel handed the part back unchanged and it was taken for the shell; now the next way is tried and the part is hollowed.
+- Boolean with a clearance: when the tool was changed later and could no longer be grown, the Boolean failed ("Tool shape is null") and broke the part; now other ways of growing it are tried on every recompute, and if none works the cavity is cut exact, with a warning.
+- Revolve about any line of the sketch: its Line of the sketch list (was Construction / projected line) offers the sketch's normal lines too, a side of the profile included; with a sketch whose lines cross (an area of it is the profile) the lines of the sketch drawn are offered, and the axis holds on to that sketch. A normal line was taken by its geometry number, which FreeCAD reads past the construction lines: the revolve failed ("Shape index out of bound").
+- Loft: equal sections picked out of order (heights 0, 20, 10) folded the loft back through itself and it was kept; now it is refused, saying which section comes back.
+- Sweep: a path in several separate pieces said only "TopoDS::Wire"; now it says how many pieces and what to do. A Sweep or Loft that runs through itself (a bend tighter than the profile, a closed loft crossing itself) is kept with a warning.
+- Extrude / Revolve from a sketch whose closed shapes cross or touch (two overlapping rectangles, two sharing a side, a circle touching a side from inside) gave a wrong solid without a word, or failed with "invalid geometry": such a sketch now offers its areas to click, like lines that cross.
+- Hide / Show while a feature dialog or an edit is open is no longer refused ("Finish the Extrude dialog first"): it is only looking.
+- Boolean: a result with nothing left (Intersect of solids that don't overlap, a Cut whose tool covers the whole part) was kept as an empty Solid without a word; now it is refused with why. Solids that only touch along a line or at a point are refused too (later features failed on such a result). A new Boolean takes faces 0.001 mm apart as one: a tool a hair short no longer leaves a paper-thin skin, and two solids a hair apart join.
+- Extrude Cut: a cut that touches a side along a line (a circle tangent to a wall) leaves a wall of no thickness: it is kept, with a warning, as a later fillet or shell fails there.
+- A feature dialog's OK on a big part (an STL's triangles: seconds to commit) no longer frees the 'busy' state in the middle of the commit.
+
 0.17.0
 ------
 Improvements

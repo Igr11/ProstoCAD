@@ -5,6 +5,7 @@ import FreeCAD as App
 import Part
 
 from incad.features.common import Field, format_picks, is_line3d, parse_picks, resolve, value_param, value_text
+from incad.core import offset2d
 
 _OP = Field("operation", "Operation", "choice", (("join", "Join"), ("cut", "Cut")), "join")
 _TYPES = {"sweep": ("PartDesign::AdditivePipe", "PartDesign::SubtractivePipe"),
@@ -101,8 +102,10 @@ def _inner_geometry(prof, t):
         if not w.isClosed():
             continue
         try:
-            off = w.makeOffset2D(-t, 2, False, False)
+            off = offset2d.offset2d(w, -t, 2, False, False)  # (a 1 mm circle crashed OCC: by its radius)
         except Exception as e:
+            if "null" in str(e).lower() or "larger than the circle" in str(e):  # (OCC's own words were shown)
+                raise ValueError("The wall (%g mm) is as thick as the profile, or thicker: make it thinner" % t)
             raise ValueError("The profile can't take a %g mm wall: %s" % (t, e))
         for e in off.Edges:
             geos.append(regions._geometry(e))
@@ -218,6 +221,10 @@ def _sweep_apply(doc, f, values):
     prof, path = _one(doc, values.get("profile"), "profile"), _one(doc, values.get("path"), "path")
     if prof is path:
         raise ValueError("The path must be another sketch than the profile")
+    if path.TypeId == "Sketcher::SketchObject" and not path.Shape.isNull() and len(path.Shape.Wires) > 1:
+        raise ValueError("The path %s is in %d separate pieces: a path is one chain of lines, arcs and splines "
+                         "joined end to end (make the other pieces Construction, or join them)"
+                         % (path.Label, len(path.Shape.Wires)))  # FreeCAD said only "TopoDS::Wire"
     f.Profile = prof
     f.Spine = (path, [])  # the whole sketch: segments added or redrawn later are followed (probed)
     f.Transition = "Round corner" if "Round corner" in f.getEnumerationsOfProperty("Transition") else f.Transition
@@ -258,6 +265,46 @@ SWEEP = SimpleNamespace(
     update=lambda doc, f, values: (_sweep_apply(doc, f, values), f)[1], _pad_of=lambda f: f)
 
 
+def _wall_drifted(f):
+    """True when a hollow Sweep's inner outline is no longer its profile offset by the wall (the profile edited:
+    a 0.5 mm wall became 1.5 mm, the finder)."""
+    t = getattr(f, WALL_PROP, None)
+    prof = _profile(f)
+    inner = next((o for o in _helpers(f) if o.TypeId == "Sketcher::SketchObject" and o.Name.startswith("SweepWallProfile")),
+                 None)
+    if t is None or prof is None or inner is None:
+        return False
+    try:
+        want = _inner_geometry(prof, t.Value)
+    except Exception:
+        return False
+    try:  # by shape, not geometry by geometry: a spline comes back with other poles (it never matched: a rebuild
+        want_edges = [g.toShape() for g in want]  # after every recompute, for ever - the finder)
+        have = inner.Shape.copy()
+        have.transformShape(inner.Placement.inverse().toMatrix())
+        length = sum(e.Length for e in want_edges)
+        a, b = Part.Compound(want_edges).BoundBox, have.BoundBox
+        same_box = all(abs(x - y) < 1e-5 for x, y in zip((a.XMin, a.YMin, a.XMax, a.YMax), (b.XMin, b.YMin, b.XMax, b.YMax)))
+        return not (same_box and abs(length - have.Length) < 1e-5 * max(1.0, length))
+    except Exception:
+        return False
+
+
+def follow_walls(doc):
+    """After a recompute (incad.ui.shell): every hollow Sweep whose profile changed gets its wall again. Returns the
+    labels rebuilt."""
+    from incad.core import safe
+    todo = [o for o in doc.Objects if o.TypeId == _TYPES["sweep"][0] and WALL_PROP in o.PropertiesList
+            and _wall_drifted(o)]
+    done = []
+    for f in todo:
+        r = safe.run_safely("%s follows its profile" % f.Label,
+                            lambda s=f: SWEEP.update(doc, s, _sweep_read(doc, s)), doc)
+        if r.ok:
+            done.append(f.Label)
+    return done
+
+
 # ----- Loft -----
 def _loft_apply(doc, f, values):
     secs = _sketches(doc, values.get("sections"))
@@ -271,8 +318,34 @@ def _loft_apply(doc, f, values):
     f.Closed = bool(values.get("closed"))
     doc.recompute()
     shape = f.AddSubShape
-    if shape.isNull() or not shape.isValid() or shape.Volume <= 0:  # probed: out-of-order sections give a
+    if not shape.isNull() and shape.isValid() and shape.Volume < 0:  # probed: out-of-order sections give a
         raise ValueError("The sections are out of order: pick them in order along the loft")  # negative volume
+    if shape.isNull() or not shape.isValid() or shape.Volume <= 0:  # (every failure said "out of order")
+        raise ValueError("No loft can be made through these sections (two in one plane, two points, a point "
+                         "between sections, or outlines too different): change the sections")
+    _in_order(secs, values.get("closed"))
+
+
+def _in_order(secs, closed):
+    """Sections picked out of order (heights 0, 20, 10): the loft folded back through itself and was kept, valid and
+    with a positive volume. Measured along each section's own normal, every step goes the same way: a zig-zag or a
+    curved loft (sections turning round an arc) is in order; one that comes back is not."""
+    if closed or len(secs) < 3:
+        return
+    try:
+        centres = [s.Shape.BoundBox.Center for s in secs]
+        normals = [s.getGlobalPlacement().Rotation.multVec(App.Vector(0, 0, 1)) for s in secs]
+    except Exception:
+        return
+    signs = []
+    for k in range(len(secs) - 1):
+        ahead = (centres[k + 1] - centres[k]).dot(normals[k])
+        if abs(ahead) > 1e-6:
+            signs.append(ahead > 0)
+    for k in range(1, len(signs)):
+        if signs[k] != signs[0]:
+            raise ValueError("The sections are out of order: %s comes back towards %s - pick them in order along "
+                             "the loft" % (secs[k + 1].Label, secs[k].Label))
 
 
 def _loft_create(doc, body, profile, values):

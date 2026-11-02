@@ -172,6 +172,48 @@ class ExtrudeTest(unittest.TestCase):
         self.doc.recompute()
         return sk
 
+    def test_through_all_with_a_taper_goes_through_and_follows(self):
+        """Through All runs the whole box diagonal: an inward taper closed the profile ("values too large")."""
+        base = self.make()  # 20 x 10 x 10
+        hole = self.body.newObject("Sketcher::SketchObject", "Sq")
+        hole.AttachmentSupport = [(util.xy_plane(self.body), "")]
+        hole.MapMode = "FlatFace"
+        hole.AttachmentOffset = App.Placement(App.Vector(0, 0, 10), App.Rotation())
+        p = [App.Vector(6, 1, 0), App.Vector(14, 1, 0), App.Vector(14, 9, 0), App.Vector(6, 9, 0)]
+        for i in range(4):
+            hole.addGeometry(Part.LineSegment(p[i], p[(i + 1) % 4]))
+        self.doc.recompute()
+        f = extrude.create(self.doc, self.body, hole, dict(extrude.defaults(self.doc, self.body, hole),
+                                                            operation="cut", extent="through_all", taper="-5 °"))
+        self.doc.recompute()
+        self.assertNotIn("Invalid", f.State, f.getStatusString())
+        self.assertEqual(extrude.read(self.doc, f)["extent"], "through_all")
+        self.assertLess(self.body.Tip.Shape.Volume, 2000 - 60)
+        base.Length = 20
+        hole.AttachmentOffset = App.Placement(App.Vector(0, 0, 20), App.Rotation())
+        self.doc.recompute()
+        self.assertEqual(extrude.follow_reach(self.doc), [f.Label])
+        self.doc.recompute()
+        self.assertAlmostEqual(f.Length.Value, 21, places=6)
+
+    def test_a_join_partly_on_the_part_stays_in_the_part(self):
+        """One square on the part and one beside it: the whole extrude went into a new Solid of two lumps."""
+        self.make()
+        two = self.body.newObject("Sketcher::SketchObject", "Two")
+        two.AttachmentSupport = [(util.xy_plane(self.body), "")]
+        two.MapMode = "FlatFace"
+        two.AttachmentOffset = App.Placement(App.Vector(0, 0, 10), App.Rotation())
+        for x0 in (2, 40):
+            p = [App.Vector(x0, 2, 0), App.Vector(x0 + 4, 2, 0), App.Vector(x0 + 4, 6, 0), App.Vector(x0, 6, 0)]
+            for i in range(4):
+                two.addGeometry(Part.LineSegment(p[i], p[(i + 1) % 4]))
+        self.doc.recompute()
+        f = extrude.create(self.doc, self.body, two, dict(extrude.defaults(self.doc, self.body, two),
+                                                           operation="join", distance="3 mm"))
+        self.doc.recompute()
+        self.assertIs(f.getParentGeoFeatureGroup(), self.body)
+        self.assertEqual(len(document.bodies(self.doc)), 1)
+
     def test_a_sketch_on_the_parts_face_extruded_off_it_is_an_independent_solid(self):
         """The user: a D-shape sketched on the hex's face, off the hex, extruded: the new Solid held the hex too
         (a Pad first in a Solid takes its sketch's support as its base), Make Assembly then failed. Nothing

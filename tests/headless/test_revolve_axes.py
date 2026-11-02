@@ -45,7 +45,7 @@ class RevolveAxesTest(unittest.TestCase):
 
     def test_construction_lines_are_listed_and_one_is_the_default(self):
         sk = profile(self.body, self.xz, construction=[((5, -5), (5, 20))])
-        self.assertEqual(revolve.construction_lines(sk), [("Axis0", "Line 1 · 25 mm, vertical")])
+        self.assertEqual(revolve.construction_lines(sk), [("Axis0", "Line 5 · 25 mm, vertical (construction)")])
         values = revolve.defaults(self.doc, self.body, sk)
         self.assertEqual((values["axis_mode"], values["axis_construction"]), ("construction", "Axis0"))
         f = self.make(sk)
@@ -60,15 +60,43 @@ class RevolveAxesTest(unittest.TestCase):
         self.assertEqual([v for v, _ in lines], ["Axis0", "Axis1"])
         self.assertIn("horizontal", lines[1][1])
         self.assertEqual(revolve.defaults(self.doc, self.body, sk)["axis_mode"], "V_Axis")
-        self.assertEqual(revolve.options("axis_construction", {}, sk), lines)
+        self.assertEqual(revolve.options("axis_construction", {}, sk)[:2], lines)  # the profile's lines follow
         f = self.make(sk, axis_mode="construction", axis_construction="Axis1")
         self.assertEqual(f.ReferenceAxis[1], ["Axis1"])
 
-    def test_construction_mode_without_a_line_says_so(self):
+    def test_two_angles_past_a_full_turn_are_refused(self):
+        """200 + 200 gave a 40 deg wedge without a word (OCC turns the total round past 360)."""
         sk = profile(self.body, self.xz)
         with self.assertRaises(ValueError) as cm:
-            self.make(sk, axis_mode="construction", axis_construction="")
-        self.assertIn("construction or projected line", str(cm.exception))
+            self.make(sk, extent="two_angles", angle="200 °", angle2="200 °")
+        self.assertIn("more than a full turn", str(cm.exception))
+
+    def test_a_side_of_the_profile_is_an_axis_too(self):
+        """The user's law: Revolve works about any line of the sketch, a side of the profile itself included."""
+        sk = profile(self.body, self.xz)
+        self.assertIn(("Line4", "Line 4 · 10 mm"), revolve.axis_line_options(sk))
+        f = self.make(sk, axis_mode="construction", axis_construction="Line4")  # the side x = 10
+        self.assertAlmostEqual(f.Shape.Volume, 3.14159265 * 8 ** 2 * 10, places=1)
+        back = revolve.read(self.doc, f)  # read back as the line picked: the same axis
+        self.assertEqual((back["axis_mode"], back["axis_ref"]), ("reference", "%s:Edge4" % sk.Name))
+
+    def test_an_area_copy_offers_the_drawn_sketchs_lines(self):
+        """A sketch whose lines cross is extruded through an area copy: its lines (construction ones too) are still
+        the axes, held on the sketch the user drew."""
+        from incad.core import regions
+        sk = profile(self.body, self.xz, construction=[((5, -5), (5, 20))])
+        sk.addGeometry(Part.LineSegment(App.Vector(0, -5, 0), App.Vector(0, 25, 0)))  # a normal line beside it
+        self.doc.recompute()
+        area = regions.make_profile(self.doc, self.body, sk, regions.regions(sk)[0])
+        self.assertIn("Axis0", [v for v, _ in revolve.axis_line_options(area)])
+        f = self.make(area, axis_mode="construction", axis_construction="Line6")  # the normal line x = 0 (Edge5: construction left out)
+        self.assertIs(f.ReferenceAxis[0], sk)
+        self.assertAlmostEqual(f.Shape.Volume, 3.14159265 * (18 ** 2 - 10 ** 2) * 10, places=1)
+        g = revolve.update(self.doc, f, dict(revolve.read(self.doc, f), axis_mode="construction",
+                                             axis_construction="Axis0"))  # its construction line x = 5
+        self.doc.recompute()
+        self.assertNotIn("Invalid", g.State, g.getStatusString())
+        self.assertAlmostEqual(g.Shape.Volume, 3.14159265 * (13 ** 2 - 5 ** 2) * 10, places=1)
 
     def test_sketch_line_origin_axis_and_solid_edge_as_reference(self):
         sk = profile(self.body, self.xz)

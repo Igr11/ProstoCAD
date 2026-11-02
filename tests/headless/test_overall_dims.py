@@ -21,6 +21,27 @@ class OverallDimsTest(unittest.TestCase):
     def tearDown(self):
         App.closeDocument(self.doc.Name)
 
+    def projected(self, *geoms):
+        """Projected edges in the sketch (ids -3, -4…): another sketch's geometry, as Project gives it."""
+        ref = self.body.newObject("Sketcher::SketchObject", "Ref")
+        ref.AttachmentSupport = [(util.xy_plane(self.body), "")]
+        ref.MapMode = "FlatFace"
+        for g in geoms:
+            ref.addGeometry(g)
+        self.doc.recompute()
+        for i in range(len(geoms)):
+            self.sk.addExternal(ref.Name, "Edge%d" % (i + 1))
+        self.doc.recompute()
+        return [-3 - i for i in range(len(geoms))]
+
+    def test_a_projected_circle_and_a_construction_one(self):
+        """The user's law: projected and construction circles count like normal ones."""
+        (ext,) = self.projected(Part.Circle(V(0, 0, 0), V(0, 0, 1), 5))
+        own = self.sk.addGeometry(Part.Circle(V(20, 0, 0), V(0, 0, 1), 3), True)
+        i = overall_dims.overall(self.sk, ext, own)
+        self.assertAlmostEqual(self.sk.Constraints[i].Value, 28, places=6)
+        self.assertEqual(overall_dims.kind_of(self.sk, i), ("overall", ext, own))
+
     def slot(self):
         c1, c2, r = slots.overall(V(0, 0, 0), V(40, 0, 0), V(20, 5, 0))  # 40 long, 10 wide
         return slots.add(self.sk, c1, c2, r)

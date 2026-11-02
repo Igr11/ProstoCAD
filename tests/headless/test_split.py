@@ -191,6 +191,26 @@ class SplitTest(unittest.TestCase):
         self.doc.recompute()
         self.assertEqual(self.pieces(f), [1600.0, 400.0])
 
+    def test_the_knife_edited_outside_the_dialog_keeps_each_piece_in_one_solid(self):
+        """A line deleted from the knife made a piece Solid copy the part's own piece (material twice); lines added
+        lost a piece. Shared out again right after the recompute (as the window does)."""
+        sk = line_sketch(self.body, ((5, -5), (5, 15)), ((15, -5), (15, 15)))
+        f = self.make(sk)
+        self.assertEqual(len(split.piece_bodies(f)), 2)
+        sk.delGeometries([1])
+        self.doc.recompute()
+        split.sync_pending()
+        self.doc.recompute()
+        vols = sorted(round(b.Shape.Volume, 3) for b in document.bodies(self.doc))
+        self.assertEqual(vols, [500.0, 1500.0])  # 20 x 10 x 10 cut at x = 5 only
+        sk.addGeometry(Part.LineSegment(App.Vector(10, -5, 0), App.Vector(10, 15, 0)))
+        sk.addGeometry(Part.LineSegment(App.Vector(15, -5, 0), App.Vector(15, 15, 0)))
+        self.doc.recompute()
+        split.sync_pending()
+        self.doc.recompute()
+        vols = sorted(round(b.Shape.Volume, 3) for b in document.bodies(self.doc))
+        self.assertEqual(vols, [500.0, 500.0, 500.0, 500.0])
+
     def test_a_pad_on_a_piece_solid_stays_in_it(self):
         f = self.make(line_sketch(self.body, ((5, -5), (5, 15))))
         other = split.piece_bodies(f)[0]

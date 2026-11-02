@@ -36,6 +36,62 @@ class SymmetricTest(unittest.TestCase):
         self.doc.recompute()
         return r
 
+    def projected(self, *geoms):
+        """Projected edges in the sketch (ids -3, -4…): another sketch's geometry, as Project gives it."""
+        ref = self.body.newObject("Sketcher::SketchObject", "Ref")
+        ref.AttachmentSupport = [(util.xy_plane(self.body), "")]
+        ref.MapMode = "FlatFace"
+        for g in geoms:
+            ref.addGeometry(g)
+        self.doc.recompute()
+        for i in range(len(geoms)):
+            self.sk.addExternal(ref.Name, "Edge%d" % (i + 1))
+        self.doc.recompute()
+        return [-3 - i for i in range(len(geoms))]
+
+    def test_a_projected_line_is_picked_and_mirrors(self):
+        """The user's law: projected geometry counts like the sketch's own."""
+        (ext,) = self.projected(Part.LineSegment(V(5, -10, 0), V(5, 10, 0)))
+        self.assertEqual(sym.pick_at(self.sk, V(5.1, 3, 0), 0.5, 0.5), ("edge", ext))
+        self.assertEqual(sym.from_subname(self.sk, "ExternalEdge1"), ("edge", ext))
+        self.assertEqual(sym.subname(self.sk, ("edge", ext)), "ExternalEdge1")
+        p = self.add(Part.Point(V(2, 1, 0)))
+        q = self.add(Part.Point(V(9, 3, 0)))
+        r = self.apply(("point", p, 1), ("point", q, 1), ("edge", ext))
+        self.assertTrue(r.ok, r.error)
+        a, b = self.sk.getPoint(p, 1), self.sk.getPoint(q, 1)
+        self.assertAlmostEqual(a.x + b.x, 10, places=6)
+        self.assertAlmostEqual(a.y, b.y, places=6)
+
+    def test_snap_to_points_and_lines_of_every_kind(self):
+        """The user's law: a drawn point snaps to normal, construction and projected geometry alike."""
+        (ext,) = self.projected(Part.LineSegment(V(20, -10, 0), V(20, 10, 0)))
+        cons = self.add(Part.LineSegment(V(0, 5, 0), V(10, 5, 0)), construction=True)
+        p, pick = sym.snap_at(self.sk, V(10.2, 5.1, 0), 0.5)
+        self.assertEqual((pick, round(p.x, 6), round(p.y, 6)), (("point", cons, 2), 10.0, 5.0))
+        p, pick = sym.snap_at(self.sk, V(4, 5.3, 0), 0.5)
+        self.assertEqual((pick, round(p.y, 6)), (("edge", cons), 5.0))
+        p, pick = sym.snap_at(self.sk, V(19.8, 10.2, 0), 0.5)
+        self.assertEqual((pick, round(p.x, 6), round(p.y, 6)), (("point", ext, 2), 20.0, 10.0))
+        p, pick = sym.snap_at(self.sk, V(30, 30, 0), 0.5)
+        self.assertIsNone(pick)
+
+    def test_a_center_slot_is_tied_where_it_snapped(self):
+        from incad.ui.slot_tool import SlotTool
+        (ext,) = self.projected(Part.LineSegment(V(20, -10, 0), V(20, 10, 0)))
+        dot = self.add(Part.Point(V(0, 0, 0)))
+        tool = SlotTool(None, self.sk, "center")
+        tool.click(*sym.snap_at(self.sk, V(0.1, 0.1, 0), 0.5))      # the centre on the point
+        tool.click(*sym.snap_at(self.sk, V(20.1, 3, 0), 0.5))       # an end's centre on the projected line
+        ids = tool.click(V(10, 4, 0))
+        self.assertIsNotNone(ids)
+        types = [c.Type for c in self.sk.Constraints]
+        self.assertIn("Symmetric", types)
+        self.assertIn("PointOnObject", types)
+        c1, c2 = self.sk.getPoint(ids[0], 3), self.sk.getPoint(ids[1], 3)
+        self.assertAlmostEqual(c2.x, 20, places=6)
+        self.assertAlmostEqual(((c1 + c2) * 0.5 - self.sk.getPoint(dot, 1)).Length, 0, places=6)
+
     def test_two_points_about_the_y_axis(self):
         p = self.add(Part.Point(V(-7, 2, 0)))
         q = self.add(Part.Point(V(5, 6, 0)))

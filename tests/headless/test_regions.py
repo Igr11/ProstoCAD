@@ -36,6 +36,32 @@ class RegionsTest(unittest.TestCase):
         self.doc.recompute()
         self.assertFalse(regions.needs_regions(plain))
 
+    def test_closed_shapes_that_cross_or_touch_go_to_areas(self):
+        """Two overlapping rectangles were padded as a wrong solid (1000 for 2750 mm3), two sharing a side failed
+        ("invalid geometry"), a circle touching the inside of a side was dropped: closed shapes that cross or touch
+        are areas to click, as lines that cross; nested or apart ones stay a plain profile."""
+        def sketch(name, shapes):
+            sk = self.body.newObject("Sketcher::SketchObject", name)
+            sk.AttachmentSupport = [(util.xy_plane(self.body), "")]
+            sk.MapMode = "FlatFace"
+            for kind, a, b, c, d in shapes:
+                if kind == "r":
+                    p = [App.Vector(a, b, 0), App.Vector(a + c, b, 0), App.Vector(a + c, b + d, 0),
+                         App.Vector(a, b + d, 0)]
+                    for i in range(4):
+                        sk.addGeometry(Part.LineSegment(p[i], p[(i + 1) % 4]))
+                else:
+                    sk.addGeometry(Part.Circle(App.Vector(a, b, 0), App.Vector(0, 0, 1), c))
+            self.doc.recompute()
+            return sk
+        for name, shapes in (("Overlap", [("r", 0, 0, 20, 10), ("r", 15, 5, 10, 10)]),
+                             ("SharedSide", [("r", 0, 0, 20, 10), ("r", 20, 0, 10, 10)]),
+                             ("TouchInside", [("r", 0, 0, 20, 10), ("c", 16, 5, 4, 0)])):
+            self.assertTrue(regions.needs_regions(sketch(name, shapes)), name)
+        for name, shapes in (("Hole", [("r", 0, 0, 20, 10), ("c", 10, 5, 3, 0)]),
+                             ("Apart", [("r", 0, 0, 20, 10), ("r", 30, 0, 10, 10)])):
+            self.assertFalse(regions.needs_regions(sketch(name, shapes)), name)
+
     def test_areas_between_the_lines(self):
         areas = [round(f.Area, 2) for f in regions.regions(self.sk)]
         self.assertEqual(areas, [100.0, round(100 - math.pi * 9, 2), round(math.pi * 9, 2)])

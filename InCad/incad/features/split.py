@@ -181,10 +181,18 @@ class SplitPieceFeature:
         obj.Proxy = self
 
     def execute(self, obj):
+        import Part
         f = obj.Source
         if f is None or f.BaseFeature is None or f.Sketch is None:
             return
-        obj.Shape = _nearest(pieces(f), obj.Point)
+        if not any(b.TypeId == "PartDesign::Body" and b.BaseFeature is obj for b in obj.InList):
+            return  # its Solid was deleted by the user: nothing of it is shared out again
+        mine, unclaimed = _assigned(f, obj)
+        more = unclaimed and len(pieces(f)) > int(getattr(f, _COUNT, 0) or 0)  # a Solid the user deleted stays gone
+        if mine is None or more:  # a Solid without a piece, or new pieces without a Solid: shared out again
+            NEEDS_SYNC.add((f.Document.Name, f.Name))  # right after this recompute (incad.ui.shell)
+        if mine is not None:
+            obj.Shape = mine  # (none: left as it was until the Solid goes)
 
     def dumps(self):
         return None
@@ -194,6 +202,49 @@ class SplitPieceFeature:
 
 
 _PIECE = "InCadSplitPiece"
+_COUNT = "InCadSplitPieces"
+NEEDS_SYNC = set()  # (document, Split) whose pieces and piece Solids no longer match: see sync_pending
+
+
+def sync_pending():
+    """Share the pieces out again for every Split a recompute found out of step (its knife sketch edited outside
+    the dialog): a Solid left without a piece goes, a new piece gets a Solid. Its own undo step."""
+    from incad.core import safe
+    todo, done = sorted(NEEDS_SYNC), []
+    NEEDS_SYNC.clear()
+    for doc_name, name in todo:
+        try:
+            doc = App.getDocument(doc_name)
+        except Exception:
+            continue
+        f = doc.getObject(name)
+        if f is None or not claims(f):
+            continue
+        r = safe.run_safely("Split pieces", lambda d=doc, s=f: _sync_pieces(d, s), doc)
+        if r.ok:
+            done.append(f.Label)
+    NEEDS_SYNC.clear()  # (the sync's own recompute is in step)
+    return done
+
+
+def _assigned(f, piece_obj):
+    """(the piece of `piece_obj`, how many pieces have no Solid), shared out as the dialog does (_sync_pieces): the
+    Split keeps the piece at its point, then each piece Solid in turn the free piece nearest its point. Each piece
+    then sits in one Solid only: the knife sketch edited outside the dialog made a piece Solid take the Split's own
+    piece (material twice) and lose another (the finder's repro: 9000 / 3000 / 9000 for 6000 / 3000 / 3000)."""
+    all_ = pieces(f)
+    main = _nearest(all_, f.Keep[0]) if f.Keep else all_[0]
+    claimed, mine = [main], None
+    for b in piece_bodies(f):
+        point = getattr(b.BaseFeature, "Point", None)
+        free = [p for p in all_ if p not in claimed]
+        if point is None or not free:
+            continue
+        best = _nearest(free, point)
+        claimed.append(best)
+        if b.BaseFeature is piece_obj:
+            mine = best
+    return mine, len(all_) - len(claimed)
 
 
 def claims(feature):
@@ -315,6 +366,10 @@ def _sync_pieces(doc, f):
         if p not in claimed:
             _new_piece_body(doc, f, inside_point(p))
             claimed.append(p)
+    if _COUNT not in f.PropertiesList:  # (see SplitPieceFeature.execute: only more pieces than this are new ones)
+        f.addProperty("App::PropertyInteger", _COUNT, "InCad", "Pieces at the last share-out")
+        f.setPropertyStatus(_COUNT, "Hidden")
+    setattr(f, _COUNT, len(all_pieces))
 
 
 def defaults(doc, body, profile=None):

@@ -1,11 +1,12 @@
 """Sketch ▸ Overall Dimension (incad.core.overall_dims): the distance between the OUTER edges of two arcs or circles —
 a slot's overall length. A click on one edge of a slot takes the slot (its two arcs); otherwise two clicks on arcs or
-circles. One undo step; the tool ends (as Offset does) and the value box opens on a driving dimension. Arcs or circles
+circles — normal, construction or projected ones alike (the user's law). One undo step; the tool ends (as Offset does) and the value box opens on a driving dimension. Arcs or circles
 selected before the command are taken at once."""
 import FreeCAD as App
 import Part
 
 from incad.core import log, overall_dims, safe
+from incad.qt import viewport_of
 
 PICK_PX = 8  # logical px around the pointer that count as a click on an edge
 PROMPT_FIRST = "Click a slot, or the first arc or circle (Esc cancels)"
@@ -54,21 +55,20 @@ class OverallDimTool:
         if pt is None:
             return
         try:
-            dpr = self.view.graphicsView().viewport().devicePixelRatioF()
+            dpr = viewport_of(self.view).devicePixelRatioF()
         except Exception:
             dpr = 1.0
         far = self.to_sketch(x + PICK_PX * dpr, y)
         self.click(pt, (far - pt).Length if far is not None else 1.0)
 
     def nearest(self, pt, tol):
-        """The sketch's normal geometry nearest the point, within tol, or None."""
+        """The sketch's geometry nearest the point (construction and projected edges too), within tol, or None."""
         probe = Part.Vertex(pt)
         best, best_d = None, tol
-        for g in range(self.sketch.GeometryCount):
-            if self.sketch.getConstruction(g):
-                continue
+        sk = self.sketch
+        for g in list(range(sk.GeometryCount)) + [-1 - k for k in range(2, len(sk.ExternalGeo))]:
             try:
-                d = self.sketch.Geometry[g].toShape().distToShape(probe)[0]
+                d = overall_dims.geometry(sk, g).toShape().distToShape(probe)[0]
             except Exception:
                 continue
             if d <= best_d:
@@ -86,11 +86,11 @@ class OverallDimTool:
         """Take geometry g: a slot's edge (nothing picked yet) is the whole slot; an arc or circle is one end.
         Returns the new dimension's name once two are taken (or '' for a reference), else None."""
         sk = self.sketch
-        if not self.picked:
+        if not self.picked and g >= 0:
             slot = overall_dims.slot_of(sk, g)
             if slot is not None:
                 return self._place(*slot)
-        if sk.Geometry[g].TypeId not in overall_dims.ROUND:
+        if overall_dims.geometry(sk, g).TypeId not in overall_dims.ROUND:
             log.report("warning", "Pick an arc or a circle (or one edge of a slot)")
             return None
         if g in self.picked:
@@ -131,6 +131,7 @@ class OverallDimTool:
             import FreeCADGui as Gui
             Gui.Selection.clearSelection()
             for g in ids:
-                Gui.Selection.addSelection(self.sketch.Document.Name, self.sketch.Name, "Edge%d" % (g + 1))
+                Gui.Selection.addSelection(self.sketch.Document.Name, self.sketch.Name,
+                                           "Edge%d" % (g + 1) if g >= 0 else "ExternalEdge%d" % (-g - 2))
         except Exception:
             pass

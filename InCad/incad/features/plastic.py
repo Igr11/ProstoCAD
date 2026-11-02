@@ -19,6 +19,7 @@ import Part
 
 from incad.features.common import Field, fine_step, format_picks, parse_picks, resolve, value_param, value_text
 from incad.threads import inserts
+from incad.core import offset2d
 
 TYPES = ("PartDesign::FeaturePython",)
 MARK = "InCadPlastic"  # its settings (JSON): which tool, and its choices
@@ -267,13 +268,13 @@ def _band(face, edge, width):
         bands = []
         for w in holes:
             inner = Part.Face(w)
-            bands.append(inner.makeOffset2D(width, 2, False, False).cut(inner))  # corners stay as sharp as the box's
+            bands.append(offset2d.offset2d(inner, width, 2, False, False).cut(inner))  # corners stay as sharp as the box's
         band = bands[0]
         for b in bands[1:]:
             band = band.fuse(b)
         return band
     outer = Part.Face(face.OuterWire)
-    return outer.cut(outer.makeOffset2D(-width, 2, False, False))
+    return outer.cut(offset2d.offset2d(outer, -width, 2, False, False))
 
 
 def lip_solid(face, values):

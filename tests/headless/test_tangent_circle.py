@@ -57,6 +57,22 @@ class TangentCircleTest(unittest.TestCase):
         self.assertAlmostEqual(g[a].EndPoint.y, 0, places=6)
         self.assertAlmostEqual((V(g[b].Center) - V(5, 20, 0)).Length, 0, places=6)
 
+    def test_projected_edges_count_like_its_own_lines(self):
+        box = self.doc.addObject("Part::Box", "Box")
+        box.Length, box.Width = 30, 40
+        self.doc.recompute()
+        for i, e in enumerate(box.Shape.Edges, 1):  # the bottom face's edges along x at y = 0 and along y at x = 0
+            a, b = e.Vertexes[0].Point, e.Vertexes[1].Point
+            if a.z == b.z == 0 and (a.y == b.y == 0 or a.x == b.x == 0):
+                self.sk.addExternal("Box", "Edge%d" % i)
+        self.doc.recompute()
+        own = self.line((30, 0), (0, 40))
+        k = tangent_circle.add(self.sk, [-3, -4, own])
+        c = self.sk.Geometry[k]
+        self.assertAlmostEqual(c.Radius, 10, places=5)
+        self.assertAlmostEqual(c.Center.x, 10, places=5)
+        self.assertAlmostEqual(c.Center.y, 10, places=5)
+
     def test_refused(self):
         a = self.line((0, 0), (10, 0))
         with self.assertRaises(ValueError):

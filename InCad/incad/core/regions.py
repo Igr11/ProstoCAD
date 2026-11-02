@@ -23,12 +23,83 @@ def needs_regions(sk):
         sh = _local_shape(sk)
         if not sh.Edges:
             return False
-        if any(not w.isClosed() for w in sh.Wires):
+        wires = sh.Wires
+        if any(not w.isClosed() for w in wires):
             return True
-        Part.makeFace(sh.Wires, "Part::FaceMakerBullseye")
-        return False
+        if _wires_meet(wires) or _edges_overlap(sh.Edges) or any(_figure_eight(w) for w in wires):  # FreeCAD made a face of these too, a wrong one: two
+            return True  # overlapping rectangles were padded as their difference, two sharing a side failed
+        face = Part.makeFace(wires, "Part::FaceMakerBullseye")
+        return not face.isValid()
     except Exception:
         return True
+
+
+def _wires_meet(wires, most=200):
+    """Two closed wires crossing or touching (a line or a point in common): only nested or apart ones make a plain
+    profile. More than `most` wires: not looked at (slow; text, patterns)."""
+    if len(wires) < 2 or len(wires) > most:
+        return False
+    boxes = [w.BoundBox for w in wires]
+    try:
+        for i, a in enumerate(wires):
+            for j in range(i + 1, len(wires)):
+                if boxes[i].intersect(boxes[j]) and a.distToShape(wires[j])[0] < 1e-7:
+                    return True
+    except Exception:
+        return True
+    return False
+
+
+def _figure_eight(wire):
+    """A wire that passes one point twice (two outlines touching at a corner: FreeCAD joins them into one)."""
+    count = {}
+    for e in wire.Edges:
+        for v in e.Vertexes:
+            key = (round(v.X, 6), round(v.Y, 6), round(v.Z, 6))
+            count[key] = count.get(key, 0) + 1
+    return any(n > 2 for n in count.values())
+
+
+def _edges_overlap(edges, tol=1e-7):
+    """Two edges lying on each other along a length (two rectangles sharing a side: FreeCAD joins them into one
+    wire that runs along that side twice). Plain arithmetic, no kernel call (this runs on every selection): lines on
+    one line with overlapping spans; arcs / circles with one centre and radius."""
+    lines, rounds = [], []
+    for e in edges:
+        c = e.Curve
+        name = type(c).__name__
+        if name == "Line":
+            a, b = e.Vertexes[0].Point, e.Vertexes[-1].Point
+            d = b - a
+            if d.Length > tol:
+                lines.append((a, d))
+        elif name == "Circle":
+            rounds.append((c.Center, c.Radius, e))
+    buckets = {}  # lines on one infinite line together (O(n^2) over 1600 lines took 0.8 s on every selection)
+    import math
+    for a, d in lines:
+        ang = math.atan2(d.y, d.x) % math.pi
+        if ang > math.pi - 1e-6:
+            ang = 0.0
+        off = -a.x * math.sin(ang) + a.y * math.cos(ang)  # the line's distance from the origin, signed
+        buckets.setdefault((round(ang, 5), round(off, 4)), []).append((a, d))
+    for group in buckets.values():
+        for i, (a, d) in enumerate(group):
+            u = d * (1.0 / d.Length)
+            for b, e in group[i + 1:]:
+                if u.cross(e).Length > tol * e.Length or u.cross(b - a).Length > tol:
+                    continue  # not on one line
+                s0, s1 = sorted(((b - a).dot(u), (b + e - a).dot(u)))
+                if min(s1, d.Length) - max(s0, 0.0) > tol:
+                    return True
+    for i, (c, r, e) in enumerate(rounds):
+        for c2, r2, e2 in rounds[i + 1:]:
+            if (c - c2).Length < tol and abs(r - r2) < tol:  # one circle (rare): do they share a stretch of it?
+                for x, y in ((e, e2), (e2, e)):
+                    mid = x.valueAt(0.5 * (x.FirstParameter + x.LastParameter))
+                    if y.distToShape(Part.Vertex(mid))[0] < 1e-6:
+                        return True
+    return False
 
 
 def _guides(sk):
@@ -182,15 +253,23 @@ def _same_geometry(profile, geos):
         return False
 
 
-def fill(profile, faces):
-    """The profile's geometry: the outlines of these faces (left alone when it already is, see _attach_like)."""
+def fill(profile, faces, source=None):
+    """The profile's geometry: the outlines of these faces, then the source sketch's construction lines (as
+    construction: a Revolve's axis is one, read on the profile itself and following the sketch - a helper through
+    fixed points stayed put, the finder); left alone when it already is (see _attach_like)."""
     geos = []
     for face in (faces if isinstance(faces, (list, tuple)) else [faces]):
         geos += outline(face)
+    n = len(geos)
+    if source is not None:
+        geos += [g.copy() for i, g in enumerate(source.Geometry)
+                 if g.TypeId == "Part::GeomLineSegment" and source.getConstruction(i)]
     if _same_geometry(profile, geos):
         return
     profile.deleteAllGeometry()
     profile.addGeometry(geos)
+    for i in range(n, len(geos)):
+        profile.setConstruction(i, True)
 
 
 def make_profile(doc, body, source, face):
@@ -207,7 +286,7 @@ def make_profile(doc, body, source, face):
     if len(pts) > 1:
         data["points"] = [[p.x, p.y] for p in pts]
     setattr(sk, REGION, json.dumps(data))
-    fill(sk, face)
+    fill(sk, face, source)
     sk.Visibility = False
     doc.recompute()
     return sk
@@ -243,7 +322,7 @@ def update(profile):
             return False
         faces.append(face)
     _attach_like(profile, source)
-    fill(profile, faces)
+    fill(profile, faces, source)
     return True
 
 

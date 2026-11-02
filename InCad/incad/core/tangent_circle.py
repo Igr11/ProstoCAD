@@ -124,15 +124,21 @@ def _solve(A, b):
     return [M[i][n_] / M[i][i] for i in range(n_)]
 
 
+def geometry(sk, i):
+    """The sketch's geometry by its Sketcher id: its own from 0 up, the axes -1 and -2, projected edges -3 down."""
+    return sk.Geometry[i] if i >= 0 else sk.ExternalGeo[-i - 1]
+
+
 def add(sk, picks):
-    """A circle tangent to the sketch's geometries `picks` (2 or 3 indices). Returns its index."""
+    """A circle tangent to the sketch's geometries `picks` (2 or 3 Sketcher ids: projected edges too). Returns its
+    index."""
     import Part
     import Sketcher
     if len(picks) not in (2, 3):
         raise ValueError("Tangent Circle: select two or three lines, arcs or circles")
-    geos = [sk.Geometry[i] for i in picks]
+    geos = [geometry(sk, i) for i in picks]
     if any(g.TypeId not in KINDS for g in geos):
-        raise ValueError("Tangent Circle: only lines, arcs and circles")
+        raise ValueError("Tangent Circle: only lines, arcs and circles (a spline can't be touched)")
     centre, r = start(geos)
     k = sk.addGeometry(Part.Circle(V(centre.x, centre.y, 0), V(0, 0, 1), r), False)
     for i in picks:

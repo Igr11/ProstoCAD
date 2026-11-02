@@ -21,6 +21,9 @@ RECREATE_ON = ("base",)  # a different base means a Boolean in another solid
 PROPS = {}
 _STORE = "InCadCombine"
 _TYPE = {"join": "Fuse", "cut": "Cut", "intersect": "Common"}
+# The kernel's fuzzy tolerance for a new Boolean, mm: faces this close count as one. Without it a tool 0.001 mm short
+# left a skin that thin, and two solids 0.001 mm apart stayed two; far below anything a printer makes.
+FUZZY = 1e-3
 
 FIELDS = (
     Field("base", "Base", "pick", pick="body"),
@@ -180,11 +183,21 @@ class _Grown:
             obj.Shape = cache[1]
             return
         self.offsets = getattr(self, "offsets", 0) + 1
-        try:
-            grown = piece.makeOffsetShape(obj.Value.Value, 1e-6, inter=bool(obj.Intersection), self_inter=False,
-                                          offsetMode=0, join=2 if obj.Join == "Intersection" else 0, fill=False)
-        except Exception:
-            grown = Part.Shape()  # _check_helpers tries round joins, then no clearance
+        grown = Part.Shape()
+        tries = [(2 if obj.Join == "Intersection" else 0, bool(obj.Intersection)), (0, True), (0, False)]
+        for join, inter in tries:  # on every recompute, not only in the dialog: a tool changed later came out
+            try:                   # empty and the Boolean failed ("Tool shape is null", the user's log)
+                grown = piece.makeOffsetShape(obj.Value.Value, 1e-6, inter=inter, self_inter=False, offsetMode=0,
+                                              join=join, fill=False)
+            except Exception:
+                grown = Part.Shape()
+            if not grown.isNull() and grown.isValid() and grown.Volume > piece.Volume:
+                break
+        else:
+            from incad.core import log
+            log.report("warning", "%s: the tool couldn't be grown by the clearance now: cut without it"
+                       % obj.Label)
+            grown = piece.copy()  # the cavity exact rather than the part broken
         self._cache = (key, grown)
         obj.Shape = grown
 
@@ -449,6 +462,8 @@ def create(doc, body, profile, values):
         raise ValueError("The base can't be a tool: pick the other solid(s) as tools")
     tip = base.Tip
     f = base.newObject("PartDesign::Boolean", "Combine")
+    if hasattr(f, "FuzzyTolerance"):
+        f.FuzzyTolerance = FUZZY
     try:
         _build(doc, f, base, values)
     except Exception:

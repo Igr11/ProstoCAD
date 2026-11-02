@@ -112,6 +112,42 @@ class _DocObserver:
 
     def slotRecomputedDocument(self, doc):
         self.callback()
+        from incad.features import split
+        if split.NEEDS_SYNC:  # a Split's knife edited outside its dialog: its piece Solids shared out again
+            QtCore.QTimer.singleShot(0, split.sync_pending)
+        if any(o.TypeId in ("PartDesign::Hole", "PartDesign::SubtractiveHelix", "PartDesign::AdditivePipe")
+               or o.TypeId in safe._LINKED or "InCadThroughAllReach" in o.PropertiesList  # holes, threads, hollow
+               for o in getattr(doc, "Objects", ())):  # sweeps, tapered Through All, dress-ups: measured again
+            QtCore.QTimer.singleShot(0, lambda d=doc: _follow_holes(d))
+
+
+_FOLLOWED_AT = {}  # document -> its undo count when the follows last ran and changed nothing
+_LINKS = {}  # document -> safe.link_snapshot of it after the last recompute (see _follow_holes)
+
+
+def _follow_holes(doc):
+    """After a recompute (not while a dialog owns the model): holes that measured the part once follow it. A follow
+    that fails rolls back, and the rollback's recompute brought it here again, for ever (the finder): with no new
+    undo step since the last run that changed nothing, nothing is tried again."""
+    from incad.core import safe
+    from incad.features import hole
+    try:
+        if safe.busy() or safe.edit_open() or doc.Name not in __import__("FreeCAD").listDocuments():
+            return
+        links = _LINKS.get(doc.Name)  # a sketch or parameter edit lost a fillet's edges: found again first
+        if links and safe.repair_links(doc, links):
+            doc.recompute()
+        _LINKS[doc.Name] = safe.link_snapshot(doc)
+        if _FOLLOWED_AT.get(doc.Name) == doc.UndoCount:
+            return
+        from incad.features import extrude, shapes, thread
+        moved = hole.follow(doc) + thread.follow_part(doc) + shapes.follow_walls(doc) + extrude.follow_reach(doc)
+        if not moved:
+            _FOLLOWED_AT[doc.Name] = doc.UndoCount
+        if moved:
+            log.report("info", "Following the part: %s" % ", ".join(moved))
+    except Exception:
+        log.logger().exception("holes follow the part")
 
 
 class _MeasurePicker:
@@ -383,6 +419,8 @@ class Shell(QtCore.QObject):
         """The open feature dialog's session — never a dead one (closed, or its dialog gone): that one is let go,
         so no command is refused for a dialog nobody can see."""
         fs = self.__dict__.get("_feature_session")
+        if fs is not None and getattr(fs, "finishing", False):
+            return fs  # OK pressed, its step being committed: still busy, not lost
         if fs is not None and not getattr(fs, "alive", True):
             self.__dict__["_feature_session"] = None
             log.logger().warning("A closed %s dialog was still held open: let go", fs.kind.TITLE)
@@ -1738,8 +1776,9 @@ class Shell(QtCore.QObject):
         sk = getattr(edit, "Object", None)
         if sk is None or sk.TypeId != "Sketcher::SketchObject":
             raise ValueError("Open a sketch first")
-        picked = [int(sub[4:]) - 1 for sel in common.selection_ex(sk.Document.Name) if sel.Object is sk
-                  for sub in (sel.SubElementNames or ()) if sub.startswith("Edge")]
+        from incad.ui.tangent_circle_tool import from_subname
+        picked = [g for sel in common.selection_ex(sk.Document.Name) if sel.Object is sk
+                  for g in map(from_subname, sel.SubElementNames or ()) if g is not None and g not in (-1, -2)]
         self.stop_slot_tool()
         Gui.runCommand("Sketcher_StopOperation")  # no FreeCAD tool fighting for the clicks
         Gui.Selection.clearSelection()
@@ -1749,15 +1788,34 @@ class Shell(QtCore.QObject):
         self.schedule_refresh()
         return self.slot_tool
 
+    def start_tangent_circle_tool(self):
+        """Sketch ▸ Tangent Circle (incad.ui.tangent_circle_tool) in the slot tool's place."""
+        import FreeCADGui as Gui
+        from incad.features import common
+        from incad.ui.tangent_circle_tool import TangentCircleTool, from_subname
+        gdoc = Gui.ActiveDocument
+        edit = gdoc.getInEdit() if gdoc is not None else None
+        sk = getattr(edit, "Object", None)
+        if sk is None or sk.TypeId != "Sketcher::SketchObject":
+            raise ValueError("Open a sketch first")
+        picked = [g for sel in common.selection_ex(sk.Document.Name) if sel.Object is sk
+                  for g in map(from_subname, sel.SubElementNames or ()) if g is not None]
+        self.stop_slot_tool()
+        Gui.runCommand("Sketcher_StopOperation")  # no FreeCAD tool fighting for the clicks
+        Gui.Selection.clearSelection()
+        self.slot_tool = TangentCircleTool(gdoc.ActiveView, sk, on_finish=self._slot_tool_done)
+        self.slot_tool.start(picked)
+        self.schedule_refresh()
+        return self.slot_tool
+
     def start_mirror_tool(self):
-        """Sketch ▸ Mirror: the selected shapes (a click on a side stands for its whole outline). The mirror line
-        selected last — an axis, the origin, or a line or point outside the shapes — makes the copy at once;
-        otherwise the tool waits for a click on it (the user: select, Mirror, then the line)."""
+        """Sketch ▸ Mirror (incad.ui.mirror_tool), tool first: the shapes, then the mirror line, by clicks. Shapes
+        selected before the command are taken; a mirror line selected last too — an axis, the origin, or a line or
+        point outside the shapes — makes the copy at once."""
         import FreeCADGui as Gui
         from incad.core import safe, sketch_mirror, sketch_symmetric as sym
-        from incad.core import sketch_offset as so
         from incad.features import common
-        from incad.ui.mirror_tool import MirrorTool
+        from incad.ui.mirror_tool import MirrorTool, outlines
         sk = self.sketches.editing()
         if sk is None:
             raise ValueError("Open a sketch first")
@@ -1768,32 +1826,15 @@ class Shell(QtCore.QObject):
                     pick = sym.from_subname(sk, sub)
                     if pick is not None and pick not in picks:
                         picks.append(pick)
-
-        def outlines(items):
-            geos = []
-            for pick in items:
-                if pick[1] < 0:
-                    continue
-                whole = [pick[1]]
-                if pick[0] == "edge":
-                    try:
-                        whole = so.outline(sk, pick[1])[0]
-                    except (ValueError, IndexError):
-                        pass
-                geos += [g for g in whole if g not in geos]
-            return geos
         axis = None
         if len(picks) >= 2:
-            last, rest = picks[-1], outlines(picks[:-1])
+            last, rest = picks[-1], outlines(sk, picks[:-1])
             if last[1] < 0 or last[1] not in rest:  # clearly no shape of the ones picked: the mirror line
                 axis, picks = last, picks[:-1]
-        geos = outlines(picks)
-        if not geos:
-            raise ValueError("Mirror: select the shapes first (click them or drag a box), then Mirror, then click "
-                             "the mirror line")
+        geos = outlines(sk, picks)
         self.stop_slot_tool()
         Gui.runCommand("Sketcher_StopOperation")
-        if axis is not None:
+        if axis is not None and geos:
             r = safe.run_safely("Mirror", lambda: sketch_mirror.mirror(sk, geos, axis), sk.Document, only=[sk])
             if not r.ok:
                 raise ValueError(r.error)

@@ -224,6 +224,88 @@ def _depth_to(doc, f, text):
     return depth
 
 
+def _centres(doc, sk):
+    """The hole centres a Concentric hole's helper sketch should hold now (its round edges where they are), in
+    the sketch's coordinates; None when they can't be found (an edge gone: left as it is)."""
+    face_text, _, edge_text = (getattr(sk, "InCadPicks", "") or "").partition("|")
+    try:
+        axes = [_round_centre(*resolve(o, s)) for o, s in parse_picks(doc, edge_text)]
+    except Exception:
+        return None
+    if not axes:
+        return None
+    inv = sk.getGlobalPlacement().inverse()
+    out = []
+    for point, _axis in axes:
+        local = inv.multVec(point)
+        at = App.Vector(local.x, local.y, 0)
+        if all((at - q).Length > 1e-6 for q in out):
+            out.append(at)
+    return out
+
+
+def _reach(f):
+    """How far the part reaches from the hole's start plane, either way, plus 1 mm."""
+    base = f.BaseFeature.Shape if f.BaseFeature is not None else None
+    prof = f.Profile[0] if isinstance(f.Profile, (tuple, list)) and f.Profile else f.Profile
+    if base is None or base.isNull() or prof is None:
+        return None
+    pl = prof.getGlobalPlacement()
+    n = pl.Rotation.multVec(App.Vector(0, 0, 1))
+    bb = base.BoundBox
+    corners = [App.Vector(x, y, z) for x in (bb.XMin, bb.XMax) for y in (bb.YMin, bb.YMax) for z in (bb.ZMin, bb.ZMax)]
+    return max(abs((c - pl.Base).dot(n)) for c in corners) + 1.0
+
+
+def _drifted(doc, f):
+    """What of the hole no longer matches the part: 'depth' (To a face that moved) and / or 'centres' (a
+    Concentric hole whose round edges moved). Both were measured once and stayed (the finder: a 10 mm block made
+    20 mm left the hole blind; a moved boss left its hole off-centre)."""
+    out = []
+    data = _load(f)
+    if data.get("depth_type") == "through_all" and data.get("hole_type") == "tapped" and f.DepthType == "Dimension":
+        reach = _reach(f)
+        if reach is not None and abs(reach - f.Depth.Value) > 1e-6:
+            out.append("reach")
+    if data.get("depth_type") == "to" and data.get("to_face"):
+        try:
+            if abs(_depth_to(doc, f, data["to_face"]) - f.Depth.Value) > 1e-6:
+                out.append("depth")
+        except Exception:
+            pass
+    prof = f.Profile[0] if isinstance(f.Profile, (tuple, list)) and f.Profile else f.Profile
+    if _is_helper(prof):
+        now = _centres(doc, prof)
+        have = [App.Vector(g.X, g.Y, 0) for g in prof.Geometry if g.TypeId == "Part::GeomPoint"]
+        if now is not None and (len(now) != len(have) or any((a - b).Length > 1e-6 for a, b in zip(now, have))):
+            out.append("centres")
+    return out
+
+
+def follow(doc):
+    """Bring every hole in step with the part after a recompute (incad.ui.shell): a To-a-face depth measured again,
+    a Concentric hole's centres put where its round edges are. One undo step when anything changed."""
+    from incad.core import safe
+    holes = [o for o in doc.Objects if o.TypeId == "PartDesign::Hole" and hasattr(o, _STORE)]
+    todo = [(h, _drifted(doc, h)) for h in holes]
+    todo = [(h, what) for h, what in todo if what]
+    if not todo:
+        return []
+
+    def go():
+        for h, what in todo:
+            if "centres" in what:
+                prof = h.Profile[0] if isinstance(h.Profile, (tuple, list)) else h.Profile
+                face_text, _, edge_text = prof.InCadPicks.partition("|")
+                _helper_sketch(doc, h.getParentGeoFeatureGroup(), {"face": face_text, "edge": edge_text}, prof)
+            if "depth" in what:
+                h.Depth = _depth_to(doc, h, _load(h)["to_face"])
+            if "reach" in what:
+                h.Depth = _reach(h)
+    r = safe.run_safely("Holes follow the part", go, doc)
+    return [h.Label for h, _ in todo] if r.ok else []
+
+
 def unavailable(values):
     """Choices the dialog greys out now: a seat (counterbore, countersink, spotface) is the start of the hole, so
     its chamfer can only be at the exit."""
@@ -244,6 +326,7 @@ def _apply_hole(doc, f, values):
     f.Reversed = bool(values.get("flip"))
     term = values.get("depth_type") or "through_all"
     f.DepthType = "ThroughAll" if term == "through_all" else "Dimension"
+    tapped_through = term == "through_all" and values.get("hole_type") == "tapped"
     insert = inserts.named(values.get("insert_size")) if values.get("hole_type") == "insert" else None
     f.DrillPoint = "Angled" if values.get("tip") == "angled" and insert is None else "Flat"
     if f.DrillPoint == "Angled":
@@ -261,6 +344,12 @@ def _apply_hole(doc, f, values):
                 f.setExpression(path, None)
         doc.recompute()
         f.Depth = _depth_to(doc, f, values.get("to_face"))
+    elif tapped_through:  # a modeled thread Through All ran its helix the whole box diagonal: 7x slower than a
+        reach = _reach(f)  # depth; it goes just past the part instead, measured again when the part changes
+        if reach is not None:
+            f.DepthType = "Dimension"
+            f.setExpression("Depth", None)
+            f.Depth = reach
     if seat == "counterbore":
         value_param(doc, f, "HoleCutDiameter", values.get("cbore_diameter") or "10 mm", "length")
         value_param(doc, f, "HoleCutDepth", values.get("cbore_depth") or "3 mm", "length")

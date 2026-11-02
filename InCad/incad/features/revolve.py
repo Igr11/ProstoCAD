@@ -16,7 +16,7 @@ PROPS = {"angle": "Angle", "angle2": "Angle2"}
 HELPER = "InCadHelperOf"      # on the Work Axis InCad makes for two points: the revolve it belongs to
 POINTS = "InCadAxisPoints"    # on that axis: the two points as typed into the field ("x y z;x y z")
 AXIS_MODES = (("V_Axis", "Sketch vertical"), ("H_Axis", "Sketch horizontal"),
-              ("construction", "Construction / projected line"), ("reference", "Line, axis or edge"),
+              ("construction", "Line of the sketch"), ("reference", "Line, axis or edge"),
               ("two_points", "Two points"))
 FIELDS = (
     Field("operation", "Operation", "choice", (("join", "Join"), ("cut", "Cut"), ("new_solid", "New Solid")), "join"),
@@ -49,8 +49,8 @@ def construction_lines(sk):
         else:
             import math
             direction = "at %.0f°" % (math.degrees(math.atan2(abs(d.y), abs(d.x))))
-        n = len(out)
-        out.append(("Axis%d" % n, "Line %d · %s, %s" % (n + 1, _mm(length), direction)))
+        n = len(out)  # (the value: FreeCAD's construction-line number; the label: the line's own number, as below)
+        out.append(("Axis%d" % n, "Line %d · %s, %s (construction)" % (i + 1, _mm(length), direction)))
     return out
 
 
@@ -112,10 +112,49 @@ def _keep_axis_out_of_profile(sk, value):
     sketch.set_projected_construction(sk, [geo], True)
 
 
-def axis_line_options(sk):
-    """Choices for the Construction / projected drop-down: the sketch's own construction lines and its projected
-    straight edges."""
-    return [(v, lbl) for v, lbl in construction_lines(sk)] + [(v, lbl) for v, lbl, _ in projected_lines(sk)]
+def lines_sketch(profile):
+    """The sketch the user drew: an area copy (a sketch whose lines cross, incad.core.regions) holds only the area's
+    outline, its source has the lines to revolve about."""
+    from incad.core import regions
+    if profile is not None and regions.is_profile(profile):
+        return regions.source_of(profile) or profile
+    return profile
+
+
+def normal_lines(sk):
+    """[("LineN", label)] for the sketch's normal straight lines (N: the geometry's number): a side of the profile is
+    an axis too (the user's law: Revolve works about any line of the sketch; normal and construction lines have
+    equal rights)."""
+    out = []
+    if sk is None:
+        return out
+    for i, g in enumerate(sk.Geometry):
+        if g.TypeId != "Part::GeomLineSegment" or sk.getConstruction(i):
+            continue
+        out.append(("Line%d" % (i + 1), "Line %d · %s" % (i + 1, _mm((g.EndPoint - g.StartPoint).Length))))
+    return out
+
+
+def _shape_edge(sk, value):
+    """The sketch Shape's "EdgeK" for normal line "LineN": FreeCAD numbers a sketch's edges over its normal
+    geometry only (construction left out), so the geometry's number is no edge name. Found by the line's ends."""
+    g = sk.Geometry[int(value[4:]) - 1]
+    pl = sk.Placement
+    a, b = pl.multVec(g.StartPoint), pl.multVec(g.EndPoint)
+    for k, e in enumerate(sk.Shape.Edges):
+        ends = [v.Point for v in e.Vertexes]
+        if len(ends) == 2 and any((ends[0] - p).Length < 1e-6 and (ends[1] - q).Length < 1e-6
+                                  for p, q in ((a, b), (b, a))):
+            return "Edge%d" % (k + 1)
+    raise ValueError("That line is no longer in the sketch: pick another axis")
+
+
+def axis_line_options(profile):
+    """Choices for the Line of the sketch drop-down: the sketch's construction lines, its projected straight edges,
+    then its normal lines (of the sketch drawn, also when an area of it is the profile)."""
+    sk = lines_sketch(profile)
+    return [(v, lbl) for v, lbl in construction_lines(sk)] + [(v, lbl) for v, lbl, _ in projected_lines(sk)] + \
+        normal_lines(sk)
 
 
 def _projected_ends(sk, value):
@@ -147,8 +186,8 @@ def defaults(doc, body, profile):
     lines = axis_line_options(profile)
     if lines:
         values["axis_construction"] = lines[0][0]
-        if len(lines) == 1:  # the one construction / projected line is what it was drawn or projected for
-            values["axis_mode"] = "construction"
+        if len(lines) - len(normal_lines(lines_sketch(profile))) == 1:  # the one construction / projected line
+            values["axis_mode"] = "construction"                         # is what it was drawn or projected for
     return values
 
 
@@ -232,8 +271,7 @@ def validate_axis(values, profile):
     mode = values.get("axis_mode") or "V_Axis"
     if mode == "construction":
         if not axis_line_options(profile):
-            raise ValueError("No construction or projected line in the sketch: draw one (Construction), project an "
-                             "edge, or choose another axis")
+            raise ValueError("No line in the sketch: draw one, project an edge, or choose another axis")
     elif mode == "reference":
         if not (values.get("axis_ref") or "").strip():
             raise ValueError("Pick a line of the sketch, an axis or a straight edge for the axis")
@@ -253,18 +291,22 @@ def _axis(doc, f, values):
     if mode == "construction":
         lines = axis_line_options(profile)
         if not lines:
-            raise ValueError("No construction or projected line in the sketch: draw one (Construction), project an "
-                             "edge, or choose another axis")
+            raise ValueError("No line in the sketch: draw one, project an edge, or choose another axis")
         wanted = values.get("axis_construction") or lines[0][0]
         if wanted not in [v for v, _ in lines]:
             wanted = lines[0][0]
+        drawn = lines_sketch(profile)
         if wanted.startswith("ext"):  # a projected line lies IN the sketch plane: a helper through its endpoints
-            ends = _projected_ends(profile, wanted)
+            ends = _projected_ends(drawn, wanted)
             if ends is None:
                 raise ValueError("That projected line is no longer in the sketch: pick another axis")
-            _keep_axis_out_of_profile(profile, wanted)
+            _keep_axis_out_of_profile(drawn, wanted)
             return _place_helper(doc, f, [ends[0], ends[1]]), [""]
-        return profile, [wanted]
+        if wanted.startswith("Line"):
+            return drawn, [_shape_edge(drawn, wanted)]
+        if drawn is not profile:  # an area copy carries its sketch's construction lines, in the same order
+            return profile, [wanted]
+        return drawn, [wanted]
     if mode == "reference":
         pairs = parse_picks(doc, values.get("axis_ref"))
         if not pairs:
@@ -287,14 +329,15 @@ def _type(operation):
     return "PartDesign::Groove" if operation == "cut" else "PartDesign::Revolution"
 
 
-def _uses_helper(values):
+def _uses_helper(values, profile=None):
     mode = values.get("axis_mode") or "V_Axis"
-    return mode == "two_points" or (mode == "construction" and (values.get("axis_construction") or "").startswith("ext"))
+    wanted = values.get("axis_construction") or ""
+    return mode == "two_points" or (mode == "construction" and wanted.startswith("ext"))
 
 
 def _apply(doc, f, values):
     f.ReferenceAxis = _axis(doc, f, values)
-    if not _uses_helper(values):
+    if not _uses_helper(values, profile_of(f)):
         _drop_helper(doc, f)
     extent = values.get("extent", "full")
     f.Type = "TwoAngles" if extent == "two_angles" else "Angle"
@@ -305,6 +348,12 @@ def _apply(doc, f, values):
         value_param(doc, f, "Angle", values.get("angle") or "90 °", "angle")
     if extent == "two_angles":
         value_param(doc, f, "Angle2", values.get("angle2") or "90 °", "angle")
+        engine = dict(f.ExpressionEngine)  # (a value is a formula until the recompute: read through it)
+        total = sum(f.evalExpression(engine[p]).Value if p in engine else getattr(f, p).Value
+                    for p in ("Angle", "Angle2"))  # OCC turns the total round past 360: 200 + 200 gave 40 deg
+        if total > 360 + 1e-9:
+            raise ValueError("The two angles add up to %g°, more than a full turn: make them 360° together at most "
+                             "(or choose Full)" % total)
 
 
 def create(doc, body, profile, values):
@@ -342,7 +391,7 @@ def read(doc, f):
         pass
     elif obj is profile and sub in ("V_Axis", "H_Axis"):
         values["axis_mode"] = sub
-    elif obj is profile and sub.startswith("Axis"):
+    elif obj in (profile, lines_sketch(profile)) and sub.startswith("Axis"):
         values.update(axis_mode="construction", axis_construction=axis_name(sub))
     elif getattr(obj, HELPER, None) == f.Name:  # a two-point or projected-line axis, both held by a helper line
         values.update(axis_mode="two_points", axis_points=getattr(obj, POINTS, ""))

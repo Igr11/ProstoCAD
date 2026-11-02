@@ -96,6 +96,31 @@ class ShapesTest(unittest.TestCase):
             self.make(shapes.LOFT, sections="%s,%s,%s" % (a.Name, c.Name, b.Name))
         self.assertIn("order", str(ctx.exception))
 
+    def test_equal_sections_out_of_order_are_refused_too(self):
+        """Equal sections at heights 0, 20, 10: the loft folded back with a positive volume and was kept."""
+        a, c, b = self.circle(3, name="A"), self.circle(3, z=20, name="C"), self.circle(3, z=10, name="B")
+        self.doc.recompute()
+        with self.assertRaises(ValueError) as ctx:
+            self.make(shapes.LOFT, sections="%s,%s,%s" % (a.Name, c.Name, b.Name))
+        self.assertIn("order", str(ctx.exception))
+
+    def test_a_loft_that_cant_be_made_is_not_called_out_of_order(self):
+        """Two sections in one plane: FreeCAD can't loft them; the message said "out of order"."""
+        a, b = self.circle(2, name="A"), self.circle(3, name="B", x=20)
+        self.doc.recompute()
+        with self.assertRaises(ValueError) as ctx:
+            self.make(shapes.LOFT, sections="%s,%s" % (a.Name, b.Name))
+        self.assertNotIn("order", str(ctx.exception))
+
+    def test_a_path_in_two_pieces_is_said_plainly(self):
+        prof = self.circle(2, name="Prof")
+        path = sketch(self.body, "XZ_Plane", "Path", [Part.LineSegment(App.Vector(0, 0, 0), App.Vector(0, 20, 0)),
+                                                       Part.LineSegment(App.Vector(10, 30, 0), App.Vector(10, 50, 0))])
+        self.doc.recompute()
+        with self.assertRaises(ValueError) as ctx:
+            self.make(shapes.SWEEP, profile=prof.Name, path=path.Name)
+        self.assertIn("2 separate pieces", str(ctx.exception))
+
     def test_sweep_follows_a_changed_path(self):
         prof = self.circle(2, name="Prof")
         path = sketch(self.body, "XZ_Plane", "Path", [Part.LineSegment(App.Vector(0, 0, 0), App.Vector(0, 20, 0))])
@@ -135,6 +160,28 @@ class SweepWallTest(ShapesTest):
         self.assertAlmostEqual(wall.Shape.Volume, expect, delta=0.02 * expect)
         kinds = sorted(o.TypeId for o in self.helpers(f))
         self.assertEqual(kinds, ["PartDesign::SubtractivePipe", "Sketcher::SketchObject"])
+
+    def test_the_wall_follows_a_changed_profile(self):
+        """The inner outline was a one-time copy: a 1 mm wall on r5 became 2 mm when the profile was made r6."""
+        import math
+        f = self.tube()
+        prof = self.doc.getObject("Prof")
+        prof.delGeometries([0])
+        prof.addGeometry(Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 6))
+        self.doc.recompute()
+        self.assertEqual(shapes.follow_walls(self.doc), [f.Label])
+        self.doc.recompute()
+        self.assertAlmostEqual(self.body.Tip.Shape.Volume, math.pi * (36 - 25) * 40, delta=1.0)
+        self.assertEqual(shapes.follow_walls(self.doc), [])
+
+    def test_a_two_mm_tube_does_not_crash(self):
+        """A circle of r 1 offset inward for the wall brought the whole program down (OCC's 2D offset)."""
+        prof = sketch(self.body, "YZ_Plane", "Prof", [Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 1)])
+        sketch(self.body, "XY_Plane", "Path", [Part.LineSegment(App.Vector(0, 0, 0), App.Vector(40, 0, 0))])
+        self.doc.recompute()
+        f = self.make(shapes.SWEEP, profile="Prof", path="Path", hollow=True, wall="0.3 mm", ends="both_open")
+        self.assertNotIn("Invalid", f.State)
+        self.assertEqual(shapes.follow_walls(self.doc), [])
 
     def test_a_closed_end_keeps_its_cap(self):
         import math

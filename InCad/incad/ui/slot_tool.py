@@ -1,12 +1,18 @@
 """InCad's own slot tools (Inventor's Overall and Center Point slots, which FreeCAD's Sketcher doesn't draw).
 
 Three clicks on the sketch plane — two points along the slot, then one for the width — with a live outline;
-continues for the next slot until Esc. The slot is added as one undo step (incad.core.slots)."""
+continues for the next slot until Esc. The slot is added as one undo step (incad.core.slots). A click near a point
+or a line of the sketch snaps to it (the user's law: normal, construction or projected alike) and the slot is tied
+there: an end's centre on the point or line, the slot's centre symmetric between its arcs' centres, an overall end on
+the arc's rim."""
 import math
 
 import FreeCAD as App
+import Sketcher
 
-from incad.core import log, safe, slots
+from incad.core import log, safe, slots, sketch_symmetric as sym
+
+SNAP_PX = 8  # logical px around the pointer that snap to a point or a line of the sketch
 
 PROMPTS = {"overall": ("Click the first end of the slot", "Click the other end", "Click to set the width"),
            "center": ("Click the slot's center", "Click one end's center", "Click to set the width")}
@@ -15,7 +21,7 @@ PROMPTS = {"overall": ("Click the first end of the slot", "Click the other end",
 class SlotTool:
     def __init__(self, view, sketch, mode, on_finish=None):
         self.view, self.sketch, self.mode = view, sketch, mode
-        self.points = []
+        self.points, self.picks = [], []
         self._on_finish = on_finish
         self._callbacks = []
         self._preview = None
@@ -65,19 +71,36 @@ class SlotTool:
         pt = self.to_sketch(*pos)
         if pt is None:
             return
+        pt, pick = self.snap(pt, self._tolerance(pos))
         if info.get("Type") == "SoMouseButtonEvent":
             if info.get("Button") == "BUTTON1" and info.get("State") == "DOWN":
-                self.click(pt)
+                self.click(pt, pick)
         else:
             self.hover(pt)
 
-    def click(self, pt):
+    def _tolerance(self, pos):
+        try:
+            from incad.qt import viewport_of
+            dpr = viewport_of(self.view).devicePixelRatioF()
+        except Exception:
+            dpr = 1.0
+        a, b = self.to_sketch(*pos), self.to_sketch(int(round(pos[0] + SNAP_PX * dpr)), pos[1])
+        return (b - a).Length if a is not None and b is not None else 0.0
+
+    def snap(self, pt, tol):
+        """(point, pick): pt moved onto a point or line of the sketch within tol (sketch_symmetric.snap_at)."""
+        if tol <= 0:
+            return pt, None
+        return sym.snap_at(self.sketch, pt, tol)
+
+    def click(self, pt, pick=None):
         self.points.append(pt)
+        self.picks.append(pick)
         if len(self.points) < 3:
             log.report("info", PROMPTS[self.mode][len(self.points)] + " (Esc finishes)")
             return None
         a, b, c = self.points
-        self.points = []
+        picks, self.points, self.picks = self.picks, [], []
         self._draw([])
         try:
             c1, c2, r = (slots.overall if self.mode == "overall" else slots.center_point)(a, b, c)
@@ -85,9 +108,27 @@ class SlotTool:
             log.report("warning", str(e))
             return None
         doc = self.sketch.Document
-        result = safe.run_safely("Slot", lambda: slots.add(self.sketch, c1, c2, r), doc)
+        def go():
+            ids = slots.add(self.sketch, c1, c2, r)
+            self._tie(ids, picks)
+            return ids
+        result = safe.run_safely("Slot", go, doc)
         log.report("info", PROMPTS[self.mode][0] + " for the next slot (Esc finishes)")
         return result.value if result.ok else None
+
+    def _tie(self, ids, picks):
+        """The slot tied where its clicks snapped (only ties the sketch still solves with are kept)."""
+        sk = self.sketch
+        a1, a2 = ids[0], ids[1]
+        if self.mode == "center":
+            centre, end = picks[0], picks[1]
+            if centre is not None and centre[0] == "point":  # the slot's centre: halfway between its arcs' centres
+                _keep(sk, Sketcher.Constraint("Symmetric", a1, 3, a2, 3, centre[1], centre[2]))
+            sym.tie_point(sk, a2, 3, end)
+            return
+        for arc, pick in ((a1, picks[0]), (a2, picks[1])):  # the outer ends: the clicked point on each arc's rim
+            if pick is not None and pick[0] == "point":
+                _keep(sk, Sketcher.Constraint("PointOnObject", pick[1], pick[2], arc))
 
     def hover(self, pt):
         if not self.points:
@@ -131,6 +172,19 @@ class SlotTool:
         self._coords.point.setValues(0, len(pts), [(p.x, p.y, 0.01) for p in pts])
         self._coords.point.setNum(len(pts))
         self._lines.numVertices.setValues(0, 1, [len(pts)]) if pts else self._lines.numVertices.setNum(0)
+
+
+def _keep(sk, c):
+    """Add constraint c when the sketch still solves with it."""
+    try:
+        i = sk.addConstraint(c)
+    except Exception:
+        return False
+    if sk.solve() != 0:
+        sk.delConstraint(i)
+        sk.solve()
+        return False
+    return True
 
 
 def _outline(c1, c2, r, steps=16):

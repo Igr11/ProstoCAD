@@ -403,3 +403,66 @@ class ShellOnTwoSolidsTest(unittest.TestCase):
         self.assertIn("2 separate solids", r.error)
         self.assertIn("one connected solid", r.error)
         self.assertNotIn("Null input shape", r.error)
+
+
+class CutTest(unittest.TestCase):
+    """A cut that leaves a wall of no thickness is said (kept)."""
+
+    def setUp(self):
+        self.doc = util.new_doc("Cuts")
+        self.body, self.pad = util.padded_part(self.doc, 10, incad=True)  # 20 x 10 x 10
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def pocket(self, x, y, r):
+        import Part
+        sk = self.body.newObject("Sketcher::SketchObject", "CutSk")
+        sk.AttachmentSupport = [(util.xy_plane(self.body), "")]
+        sk.MapMode = "FlatFace"
+        sk.AttachmentOffset = App.Placement(App.Vector(0, 0, 10), App.Rotation())
+        sk.addGeometry(Part.Circle(App.Vector(x, y, 0), App.Vector(0, 0, 1), r))
+        p = self.body.newObject("PartDesign::Pocket", "Cut")
+        p.Profile = sk
+        p.Length = 5
+        self.body.Tip = p
+        self.doc.recompute()
+        return p
+
+    def test_a_cut_touching_a_wall_along_a_line_is_said(self):
+        self.assertEqual(safe.unsound(self.pocket(6, 5, 3)), "")  # a plain hole is sound
+        self.assertIn("no thickness", safe.unsound(self.pocket(16, 5, 4)))  # tangent to the side x = 20
+
+    def test_a_hole_touching_a_side_is_said(self):
+        import Part
+        from incad.features import hole
+        sk = self.body.newObject("Sketcher::SketchObject", "HolePt")
+        sk.AttachmentSupport = [(util.xy_plane(self.body), "")]
+        sk.MapMode = "FlatFace"
+        sk.AttachmentOffset = App.Placement(App.Vector(0, 0, 10), App.Rotation())
+        sk.addGeometry(Part.Point(App.Vector(17.5, 5, 0)))  # a 5 mm hole: its edge on the side x = 20
+        self.doc.recompute()
+        f = hole.create(self.doc, self.body, None, dict(hole.defaults(self.doc, self.body, None), sketch=sk.Name,
+                                                         diameter="5 mm", depth_type="distance", depth="4 mm",
+                                                         tip="flat"))
+        self.doc.recompute()
+        self.assertIn("no thickness", safe.unsound(f))
+
+    def test_pattern_copies_off_the_part_are_said(self):
+        import Part
+        from incad.features import common, patterns
+        sk = self.body.newObject("Sketcher::SketchObject", "BossSk")
+        sk.AttachmentSupport = [(util.xy_plane(self.body), "")]
+        sk.MapMode = "FlatFace"
+        sk.AttachmentOffset = App.Placement(App.Vector(0, 0, 10), App.Rotation())
+        sk.addGeometry(Part.Circle(App.Vector(2, 5, 0), App.Vector(0, 0, 1), 1))
+        self.doc.recompute()
+        boss = util.add_pad(self.body, sk, 3, "Boss")
+        self.body.Tip = boss
+        self.doc.recompute()
+        k = patterns.RECT
+        f = k.create(self.doc, self.body, None, dict(k.defaults(self.doc, self.body, None),
+                                                     features=common.format_picks([(boss, "")]), count1="4",
+                                                     spacing1="10 mm"))
+        self.doc.recompute()
+        self.assertIn("2 of its copies land off the part", safe.unsound(f))
