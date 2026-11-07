@@ -261,3 +261,12 @@ def pick_radius_widened():
 
 def set_pick_radius_widened(value):
     _s().set("bool", "PickRadiusWidened", bool(value))
+
+
+def pick_radius_reach():
+    """incad.ui.pick_radius has set FreeCAD's pick radius to its reach in points, on any screen (once)."""
+    return bool(_s().get("bool", "PickRadiusReach", False))
+
+
+def set_pick_radius_reach(value):
+    _s().set("bool", "PickRadiusReach", bool(value))

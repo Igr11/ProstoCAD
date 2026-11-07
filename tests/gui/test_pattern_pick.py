@@ -11,6 +11,7 @@ from pivy import coin  # noqa: E402,F401
 from PySide6.QtTest import QTest  # noqa: E402
 from incad.qt import QtCore, QtWidgets  # noqa: E402
 from incad.core import commands, document, prefs  # noqa: E402
+from incad.features import own_pattern  # noqa: E402
 from incad.ui import shell  # noqa: E402
 import headless.util as util  # noqa: E402
 
@@ -90,7 +91,7 @@ def test_1_a_face_clicked_in_the_view_picks_the_feature_that_made_it():
     harness.pump(800)
     ok()
     pattern = body().Tip
-    assert pattern.TypeId == "PartDesign::LinearPattern", pattern.TypeId
+    assert own_pattern.is_own(pattern) and own_pattern.kind_of(pattern) == "rectangular", pattern.TypeId  # our own pattern
     assert [o.Name for o in pattern.Originals] == [ST["pocket"]], [o.Name for o in pattern.Originals]
     assert "Invalid" not in pattern.State, pattern.getStatusString()
 
@@ -114,7 +115,7 @@ def test_2_include_dependent_features_takes_the_hole_cut_into_the_picked_feature
     assert pad.Label in shown and "+1 dependent" in shown, shown  # names, and what the switch added
     ok()
     pattern = body().Tip
-    assert pattern.TypeId == "PartDesign::LinearPattern", pattern.TypeId
+    assert own_pattern.is_own(pattern) and own_pattern.kind_of(pattern) == "rectangular", pattern.TypeId  # our own pattern
     assert [o.Name for o in pattern.Originals] == [pad.Name, pocket.Name], [o.Name for o in pattern.Originals]
     assert "Invalid" not in pattern.State, pattern.getStatusString()
     shell.edit_feature(pattern)  # editing shows the pad with the toggle on, not the pocket as a second pick
@@ -126,7 +127,7 @@ def test_2_include_dependent_features_takes_the_hole_cut_into_the_picked_feature
 
 def test_3_even_distribution_between_two_faces_in_the_dialog():
     pad, pocket = doc().getObject(ST["pad"]), doc().getObject(ST["pocket"])  # block x 0..40, hole x 6..10
-    for o in [o for o in body().Group if o.TypeId == "PartDesign::LinearPattern"]:  # earlier tests' patterns
+    for o in [o for o in body().Group if own_pattern.kind_of(o) == "rectangular"]:  # earlier tests' patterns
         doc().removeObject(o.Name)
     body().Tip = pocket
     doc().recompute()
@@ -172,7 +173,7 @@ def test_3_even_distribution_between_two_faces_in_the_dialog():
     assert not dialog().error_text(), dialog().error_text()
     ok()
     pattern = body().Tip
-    assert pattern.TypeId == "PartDesign::LinearPattern", pattern.TypeId
+    assert own_pattern.is_own(pattern) and own_pattern.kind_of(pattern) == "rectangular", pattern.TypeId  # our own pattern
     # hole x 6..10 (margin 6 from the left face): last far edge at 40 - 6 = 34 -> spacing (34 - 10) / 2 = 12
     assert abs(pattern.Length.Value - 24.0) < 1e-3, pattern.Length.Value
     assert "Invalid" not in pattern.State, pattern.getStatusString()
@@ -180,7 +181,7 @@ def test_3_even_distribution_between_two_faces_in_the_dialog():
 
 def test_4_the_field_starts_empty_and_asks_for_a_feature_then_picks_add_up():
     pad, pocket = doc().getObject(ST["pad"]), doc().getObject(ST["pocket"])
-    for o in [o for o in body().Group if o.TypeId == "PartDesign::LinearPattern"]:
+    for o in [o for o in body().Group if own_pattern.kind_of(o) == "rectangular"]:
         doc().removeObject(o.Name)
     body().Tip = pocket
     doc().recompute()

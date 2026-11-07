@@ -148,7 +148,15 @@ class SketchSession:
         import FreeCAD as App
         doc = App.ActiveDocument
         body = document.body_of(support) or document.primary_body(doc)  # a face of a second Solid: its sketch
-        r = safe.run_safely("New Sketch", lambda: sketch.make_sketch(body, support, face), doc,
+        view_dir = view_up = None
+        try:
+            import FreeCADGui as Gui
+            view = Gui.ActiveDocument.ActiveView
+            view_dir = view.getViewDirection()
+            view_up = view.getCameraOrientation().multVec(App.Vector(0, 1, 0))  # the sketch's axes turn the shortest way
+        except Exception:
+            pass
+        r = safe.run_safely("New Sketch", lambda: sketch.make_sketch(body, support, face, view_dir, view_up), doc,
                             only=lambda sk: [sk])
         if r.ok:
             self.edit(r.value)
@@ -303,7 +311,7 @@ class SketchSession:
             style = coin.SoPickStyle()
             style.style = coin.SoPickStyle.UNPICKABLE
             color = coin.SoBaseColor()
-            hex_color = theme.SKETCH_COLORS[theme.current()]["SketchEdgeColor"].lstrip("#")
+            hex_color = theme.SKETCH_COLORS[theme.current()]["EditedEdgeColor"].lstrip("#")
             color.rgb.setValue(*(int(hex_color[i:i + 2], 16) / 255.0 for i in (0, 2, 4)))
             draw = coin.SoDrawStyle()
             draw.lineWidth = 1.5

@@ -56,7 +56,7 @@ def test_1_one_area_extrudes_at_once():
     QTest.mouseClick(dialog().ok_button, QtCore.Qt.LeftButton)
     harness.pump(800)
     pad = body().Tip
-    assert pad.TypeId == "PartDesign::Pad" and abs(pad.Shape.Volume - 2000) < 1e-3, pad.Shape.Volume
+    assert pad.TypeId == "PartDesign::FeatureAdditivePython" and abs(pad.Shape.Volume - 2000) < 1e-3, pad.Shape.Volume
     ST["pad1"] = pad.Name
 
 
@@ -142,6 +142,97 @@ def test_4_esc_cancels_the_area_pick():
     assert not doc().HasPendingTransaction
 
 
+def test_5_shift_click_takes_several_areas():
+    """The user: Shift-click several areas for one Extrude (a plain click then starts it with them all)."""
+    import math
+    from incad.qt import QtWidgets
+    sk = crossing_sketch(body(), name="Cross5")
+    sk.AttachmentOffset = App.Placement(App.Vector(0, 0, 10), App.Rotation())
+    doc().recompute()
+    harness.pump(300)
+    Gui.Selection.clearSelection()
+    Gui.Selection.addSelection(doc().Name, sk.Name)
+    commands.REGISTRY.run("feature.extrude")
+    harness.pump(1000)
+    areas = [o for o in doc().Objects if o.Name.startswith("Area") and "InCadAreaPick" in o.PropertiesList]
+    assert len(areas) == 3 and dialog() is None, [o.Name for o in areas]
+    left = min(areas, key=lambda o: o.Shape.BoundBox.Center.x)
+    ring = next(o for o in areas if o is not left and len(o.Shape.Faces[0].Wires) == 2)
+    real = QtWidgets.QApplication.keyboardModifiers
+    QtWidgets.QApplication.keyboardModifiers = staticmethod(lambda: QtCore.Qt.ShiftModifier)
+    try:
+        Gui.Selection.addSelection(doc().Name, left.Name)
+        harness.pump(800)
+    finally:
+        QtWidgets.QApplication.keyboardModifiers = real
+    assert dialog() is None, "Shift-click waits for more"
+    assert "1 areas taken" in s().status.texts()["prompt"], s().status.texts()
+    Gui.Selection.addSelection(doc().Name, ring.Name)  # a plain click: start with both
+    harness.pump(1500)
+    assert dialog() is not None, "the dialog opens on the areas taken"
+    prof = s().feature_session.profile
+    assert len(prof.Shape.Wires) == 2, "the two halves as one outline, the circle a hole"
+    tool = s().feature_session.feature.AddSubShape
+    assert abs(tool.Volume - (200 - math.pi * 9) * 10) < 1e-3, tool.Volume
+    QTest.mouseClick(dialog().cancel_button, QtCore.Qt.LeftButton)
+    harness.pump(800)
+
+
+def _two_circles(name, x):
+    """A clean sketch: two separate circles, nothing crossing (2026-11-07: its areas are picked too)."""
+    sk = body().newObject("Sketcher::SketchObject", name)
+    sk.AttachmentSupport = [(body().Origin.OriginFeatures[3], "")]
+    sk.MapMode = "FlatFace"
+    sk.AttachmentOffset = App.Placement(App.Vector(x, 0, 0), App.Rotation())
+    sk.addGeometry([Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 3),
+                    Part.Circle(App.Vector(20, 0, 0), App.Vector(0, 0, 1), 5)])
+    doc().recompute()
+    harness.pump(300)
+    return sk
+
+
+def test_6_a_clean_sketch_with_several_areas_is_picked_too():
+    """Two separate circles: no longer extruded whole at once; both areas are shown and the clicked one is used."""
+    import math
+    sk = _two_circles("Circles6", 200)
+    Gui.Selection.clearSelection()
+    Gui.Selection.addSelection(doc().Name, sk.Name)
+    commands.REGISTRY.run("feature.extrude")
+    harness.pump(1000)
+    areas = [o for o in doc().Objects if o.Name.startswith("Area") and "InCadAreaPick" in o.PropertiesList]
+    assert len(areas) == 2 and dialog() is None, [o.Name for o in areas]
+    assert "⌘A all" in s().status.texts()["prompt"] or "Ctrl+A all" in s().status.texts()["prompt"], s().status.texts()
+    small = min(areas, key=lambda o: o.Shape.Area)
+    Gui.Selection.addSelection(doc().Name, small.Name)
+    harness.pump(1500)
+    assert dialog() is not None, "the dialog opens on the clicked circle"
+    tool = s().feature_session.feature.AddSubShape
+    assert abs(tool.Volume - math.pi * 9 * 10) < 1e-3, tool.Volume
+    QTest.mouseClick(dialog().cancel_button, QtCore.Qt.LeftButton)
+    harness.pump(800)
+
+
+def test_7_all_areas_key_takes_every_area():
+    """⌘A (Ctrl+A) while the areas are shown: the feature on all of them at once."""
+    import math
+    sk = _two_circles("Circles7", 260)
+    Gui.Selection.clearSelection()
+    Gui.Selection.addSelection(doc().Name, sk.Name)
+    commands.REGISTRY.run("feature.extrude")
+    harness.pump(1000)
+    assert dialog() is None and s()._all_areas.isEnabled(), "the areas are shown and ⌘A is on"
+    s()._all_areas.trigger()
+    harness.pump(1500)
+    assert dialog() is not None, "the dialog opens on every area"
+    tool = s().feature_session.feature.AddSubShape
+    assert abs(tool.Volume - math.pi * (9 + 25) * 10) < 1e-3, tool.Volume
+    assert not s()._all_areas.isEnabled(), "⌘A is off again once the areas are gone"
+    QTest.mouseClick(dialog().cancel_button, QtCore.Qt.LeftButton)
+    harness.pump(800)
+
+
 harness.run([test_0_setup, test_1_one_area_extrudes_at_once, test_2_several_areas_are_shown_and_clicked,
              test_3_tree_shows_the_sketch_under_the_feature_and_edits_follow,
-             test_3b_a_crossed_sketch_clicked_in_the_tree_is_the_profile, test_4_esc_cancels_the_area_pick])
+             test_3b_a_crossed_sketch_clicked_in_the_tree_is_the_profile, test_4_esc_cancels_the_area_pick,
+             test_5_shift_click_takes_several_areas, test_6_a_clean_sketch_with_several_areas_is_picked_too,
+             test_7_all_areas_key_takes_every_area])

@@ -24,7 +24,8 @@ LAYOUT = {
     "sketch": {"N": "sketch.finish", "NE": "sketch.line", "E": "sketch.circle", "SE": "sketch.rectangle",
                "S": "sketch.dimension", "SW": "sketch.arc", "W": "edit.undo", "NW": "sketch.trim",
                # the shell keeps only what applies to the line or point under the cursor (the user: too many buttons)
-               "list": ["sketch.stop", "edit.delete", "sketch.construction", "sketch.constraints_toggle",
+               "list": ["sketch.stop", "edit.delete", "sketch.construction", "sketch.break_link",
+                        "sketch.constraints_toggle",
                         "sketch.constraints_window", "sketch.edit_pattern", "sketch.delete_pattern"]},
     "assembly": {"N": "assembly.place", "S": "constrain.mate", "E": "joint.rigid", "W": "assembly.create",
                  "NE": "view.zoom_all", "NW": "edit.undo", "SE": "view.home", "SW": "assembly.ground",

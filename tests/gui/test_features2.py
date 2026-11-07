@@ -11,6 +11,7 @@ from pivy import coin  # noqa: E402,F401
 from PySide6.QtTest import QTest  # noqa: E402
 from incad.qt import QtCore, QtWidgets  # noqa: E402
 from incad.core import commands, document, prefs  # noqa: E402
+from incad.features import own_pattern  # noqa: E402
 from incad.ui import shell  # noqa: E402
 import headless.util as util  # noqa: E402
 
@@ -123,7 +124,8 @@ def test_4_rectangular_pattern_of_the_hole():
     harness.pump(600)
     assert not dialog().error_text(), (dialog().error_text(), dialog().values())
     ok()
-    assert body().Tip.TypeId == "PartDesign::LinearPattern", body().Tip.TypeId
+    tip = body().Tip
+    assert own_pattern.is_own(tip) and own_pattern.kind_of(tip) == "rectangular", tip.TypeId  # our own pattern
 
 
 def test_5_measure_and_mass():

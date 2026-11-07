@@ -104,6 +104,22 @@ class ShapesTest(unittest.TestCase):
             self.make(shapes.LOFT, sections="%s,%s,%s" % (a.Name, c.Name, b.Name))
         self.assertIn("order", str(ctx.exception))
 
+    def test_loft_order_is_one_direction_whichever_way_a_sketch_faces(self):
+        """A section sketch flipped (on a downward face): heights 0, 10, 20 were refused as out of order, and
+        0, -10, 20 (a real fold back) passed. Order is judged along one direction for the whole loft."""
+        a, b, c = self.circle(5, name="A"), self.circle(3, z=-10, name="B"), self.circle(5, z=20, name="C")
+        b.MapReversed = True  # its normal points down: z = 10 in the part
+        self.doc.recompute()
+        self.assertAlmostEqual(b.Shape.BoundBox.Center.z, 10, 6)
+        f = self.make(shapes.LOFT, sections="%s,%s,%s" % (a.Name, b.Name, c.Name))
+        self.assertGreater(f.Shape.Volume, 3.14159 * 9 * 20)
+        b.AttachmentOffset = App.Placement(App.Vector(0, 0, 10), App.Rotation())  # now z = -10: a fold back
+        self.doc.recompute()
+        self.assertAlmostEqual(b.Shape.BoundBox.Center.z, -10, 6)
+        with self.assertRaises(ValueError) as ctx:
+            shapes.LOFT.update(self.doc, f, shapes.LOFT.read(self.doc, f))
+        self.assertIn("order", str(ctx.exception))
+
     def test_a_loft_that_cant_be_made_is_not_called_out_of_order(self):
         """Two sections in one plane: FreeCAD can't loft them; the message said "out of order"."""
         a, b = self.circle(2, name="A"), self.circle(3, name="B", x=20)
@@ -120,6 +136,18 @@ class ShapesTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self.make(shapes.SWEEP, profile=prof.Name, path=path.Name)
         self.assertIn("2 separate pieces", str(ctx.exception))
+
+    def test_a_profile_away_from_the_path_start_is_refused_not_kept_inside_out(self):
+        """A circle 40 mm from where the path starts: the Sweep came out with a negative volume and was kept."""
+        import math
+        self.circle(2, name="Prof", x=40)
+        arc = Part.ArcOfCircle(Part.Circle(App.Vector(10, 20, 0), App.Vector(0, 0, 1), 10), math.pi / 2, math.pi)
+        sketch(self.body, "XZ_Plane", "Path", [Part.LineSegment(App.Vector(0, 0, 0), App.Vector(0, 20, 0)),
+                                               Part.LineSegment(App.Vector(10, 30, 0), App.Vector(30, 30, 0)), arc])
+        self.doc.recompute()
+        with self.assertRaises(ValueError) as ctx:
+            self.make(shapes.SWEEP, profile="Prof", path="Path")
+        self.assertIn("38 mm away from the path's start", str(ctx.exception))
 
     def test_sweep_follows_a_changed_path(self):
         prof = self.circle(2, name="Prof")
@@ -173,6 +201,49 @@ class SweepWallTest(ShapesTest):
         self.doc.recompute()
         self.assertAlmostEqual(self.body.Tip.Shape.Volume, math.pi * (36 - 25) * 40, delta=1.0)
         self.assertEqual(shapes.follow_walls(self.doc), [])
+
+    def test_a_ring_profile_shrunk_below_the_wall_leaves_the_part_as_it_was(self):
+        """A ring profile: each loop was offset inward on its own, so the hole shrank too (a hole smaller than the
+        wall refused); a profile then made thinner than the wall kept the old inner outline, which cut the whole tube
+        away (volume 0) with only a message. Now the hole grows by the wall, and a change the wall can't follow is
+        undone: the part as it was."""
+        import math
+        from incad.core import log
+        self.doc.UndoMode = 1
+        c = lambda r: Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), r)
+        prof = sketch(self.body, "YZ_Plane", "Prof", [c(6), c(0.5)])
+        sketch(self.body, "XY_Plane", "Path", [Part.LineSegment(App.Vector(0, 0, 0), App.Vector(40, 0, 0))])
+        self.doc.recompute()
+        self.make(shapes.SWEEP, profile="Prof", path="Path", hollow=True, wall="1 mm", ends="both_open")
+        expect = math.pi * (36 - 25 + 1.5 ** 2 - 0.5 ** 2) * 40  # walls 5..6 and 0.5..1.5
+        self.assertAlmostEqual(self.body.Shape.Volume, expect, delta=0.01 * expect)
+        self.doc.openTransaction("Edit sketch")
+        prof.Geometry = [c(6), c(4.5)]  # 1.5 mm of ring: no room for two 1 mm walls
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        said = []
+        log.set_reporter(lambda level, msg: said.append(msg))
+        try:
+            self.assertEqual(shapes.follow_walls(self.doc), [])
+        finally:
+            log.set_reporter(None)
+        self.assertTrue(any("as thick as the profile" in m for m in said), said)
+        self.assertTrue(any("undone" in m for m in said), said)
+        self.assertEqual([round(g.Radius, 3) for g in prof.Geometry], [6, 0.5])
+        self.assertAlmostEqual(self.body.Shape.Volume, expect, delta=0.01 * expect)
+        self.assertTrue(self.body.Shape.isValid())
+
+    def test_a_square_profile_too_thin_for_the_wall_is_said_plainly(self):
+        """A 2 mm square with a 1 mm wall: OCC's "makeOffset2D: offset result has no wires" was shown."""
+        sq = [(-1, -1), (1, -1), (1, 1), (-1, 1)]
+        sketch(self.body, "YZ_Plane", "Prof", [Part.LineSegment(App.Vector(*sq[i], 0), App.Vector(*sq[(i + 1) % 4], 0))
+                                               for i in range(4)])
+        sketch(self.body, "XY_Plane", "Path", [Part.LineSegment(App.Vector(0, 0, 0), App.Vector(40, 0, 0))])
+        self.doc.recompute()
+        with self.assertRaises(ValueError) as ctx:
+            self.make(shapes.SWEEP, profile="Prof", path="Path", hollow=True, wall="1 mm", ends="both_open")
+        self.assertIn("as thick as the profile", str(ctx.exception))
+        self.assertNotIn("makeOffset2D", str(ctx.exception))
 
     def test_a_two_mm_tube_does_not_crash(self):
         """A circle of r 1 offset inward for the wall brought the whole program down (OCC's 2D offset)."""

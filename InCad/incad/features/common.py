@@ -113,6 +113,17 @@ def value_param(doc, feature, prop, text, unit_kind, base=None):
     return name
 
 
+def tool_shape(feature):
+    """What a PartDesign feature adds or removes (its AddSubShape) in the part's coordinates: FreeCAD keeps it in
+    the feature's own (probed: a part whose first feature is moved had every tool off by that move)."""
+    tool = feature.AddSubShape
+    if tool.isNull():
+        return tool
+    tool = tool.copy()
+    tool.Placement = feature.Placement.multiply(tool.Placement)
+    return tool
+
+
 def value_text(doc, feature, prop):
     """The dialog's text for a feature's value: its model parameter's, else the feature's own value (a feature made
     outside ProstoCAD's dialog — a FreeCAD file, an AI's script — showed the dialog's default: 10 mm for a 78 mm
@@ -194,7 +205,10 @@ WHOLE_OBJECT = ("sketch", "path")  # picks that mean the object, whatever elemen
 
 
 def whole(kind, pairs):
-    return [(o, "") for o, _ in pairs] if kind in WHOLE_OBJECT else pairs
+    if kind in WHOLE_OBJECT:
+        return [(o, "") for o, _ in pairs]
+    return [(o, "" if s in ("Line", "Plane") and o.TypeId in ("App::Line", "PartDesign::Line", "App::Plane",
+                                                               "PartDesign::Plane") else s) for o, s in pairs]
 
 
 def format_picks(pairs):
@@ -227,9 +241,11 @@ _STAND_IN_TYPES = ("PartDesign::Fillet", "PartDesign::Chamfer", "PartDesign::Thi
 
 
 def is_stand_in(obj):
-    """Features that can't be repeated themselves (a thread's helix, fillets, chamfers, shells, other patterns):
-    picking one stands for the feature it modifies."""
-    return obj.TypeId.endswith("Helix") or obj.TypeId in _STAND_IN_TYPES or "InCadShell" in obj.PropertiesList
+    """Features that can't be repeated themselves (a thread's helix, fillets, chamfers, shells, FreeCAD's and Solid
+    patterns): picking one stands for the feature it modifies. InCad's own Features pattern is repeated whole,
+    every copy (a Mirror of a pattern mirrors all its holes, as in a professional CAD)."""
+    return obj.TypeId.endswith("Helix") or obj.TypeId in _STAND_IN_TYPES or "InCadShell" in obj.PropertiesList \
+        or ("InCadPattern" in obj.PropertiesList and getattr(obj, "PatternOf", "") == "solid")
 
 
 def _profile_supports(owner):
@@ -355,6 +371,8 @@ def accepts(kind, obj, sub):
     if obj is None:
         return False
     tid = obj.TypeId
+    if tid in ("App::Line", "PartDesign::Line", "App::Plane", "PartDesign::Plane") and sub in ("Line", "Plane"):
+        sub = ""  # a work axis / plane clicked in the view comes as 'Line' / 'Plane': the whole datum (as in the tree)
     if kind == "feature":
         return feature_of(obj, sub) is not None
     if kind == "sketch":  # the sketch itself, or any point/line of it clicked in the view

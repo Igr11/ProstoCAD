@@ -57,6 +57,15 @@ def _std_new_actions():
     return _std_actions("Std_New")
 
 
+def _follow_plane_cuts(doc):
+    from incad.core import plane_cut
+    try:
+        if not getattr(doc, "Recomputing", False) and plane_cut.follow(doc):
+            doc.recompute()
+    except Exception:
+        log.logger().exception("InCad plane-cut lines")
+
+
 class _DocObserver:
     """FreeCAD document observer: any change schedules one (coalesced) panel refresh."""
 
@@ -98,6 +107,8 @@ class _DocObserver:
         if prop == "ExternalGeometry" and self.projection_callback is not None \
                 and getattr(obj, "TypeId", "") == "Sketcher::SketchObject":
             self.projection_callback(obj)  # FreeCAD sets it on many recomputes: only the projection follow-up
+        if prop == "ExternalGeometry" and getattr(obj, "TypeId", "") == "Sketcher::SketchObject":
+            _follow_axes_later(obj)  # a projected line deleted by hand: a revolve axis along it stays put
         if prop in ("Constraints", "Geometry") and getattr(obj, "TypeId", "") == "Sketcher::SketchObject" \
                 and self.sketch_callback is not None:
             self.sketch_callback(obj)
@@ -112,6 +123,9 @@ class _DocObserver:
 
     def slotRecomputedDocument(self, doc):
         self.callback()
+        if any(o.TypeId == "Sketcher::SketchObject" and "InCadPlaneCuts" in o.PropertiesList
+               for o in getattr(doc, "Objects", ())):  # lines where a plane cuts a sketch: moved with the plane
+            QtCore.QTimer.singleShot(0, lambda d=doc: _follow_plane_cuts(d))
         from incad.features import split
         if split.NEEDS_SYNC:  # a Split's knife edited outside its dialog: its piece Solids shared out again
             QtCore.QTimer.singleShot(0, split.sync_pending)
@@ -119,6 +133,23 @@ class _DocObserver:
                or o.TypeId in safe._LINKED or "InCadThroughAllReach" in o.PropertiesList  # holes, threads, hollow
                for o in getattr(doc, "Objects", ())):  # sweeps, tapered Through All, dress-ups: measured again
             QtCore.QTimer.singleShot(0, lambda d=doc: _follow_holes(d))
+
+
+def _follow_axes_later(sk):
+    """Revolve axes along the sketch's projected lines follow its projections (incad.features.revolve
+    .follow_externals), after the change notification is over."""
+    doc, name = sk.Document.Name, sk.Name
+
+    def go():
+        try:
+            import FreeCAD as App
+            o = App.getDocument(doc).getObject(name)
+            if o is not None:
+                from incad.features import revolve
+                revolve.follow_externals(o)
+        except Exception:
+            pass
+    QtCore.QTimer.singleShot(0, go)
 
 
 _FOLLOWED_AT = {}  # document -> its undo count when the follows last ran and changed nothing
@@ -141,7 +172,7 @@ def _follow_holes(doc):
         if _FOLLOWED_AT.get(doc.Name) == doc.UndoCount:
             return
         from incad.features import extrude, shapes, thread
-        moved = hole.follow(doc) + thread.follow_part(doc) + shapes.follow_walls(doc) + extrude.follow_reach(doc)
+        moved = hole.follow_part(doc) + thread.follow_part(doc) + shapes.follow_walls(doc) + extrude.follow_reach(doc)
         if not moved:
             _FOLLOWED_AT[doc.Name] = doc.UndoCount
         if moved:
@@ -374,17 +405,52 @@ class _SelectionWatch:
         self._check()
 
 
+AREA_COLOUR, AREA_PICKED = (0.95, 0.62, 0.29), (0.25, 0.55, 0.95)
+
+
+def _area_prompt(kind):
+    return "Click the area to %s; Shift-click to take several, %s all (Esc cancels)" % (
+        kind.TITLE.lower(), "⌘A" if host.MAC else "Ctrl+A")
+
+
 class _RegionPicker:
-    """Waits for a click on one of the shown areas of a sketch, then starts the feature on it."""
+    """Waits for a click on one of the shown areas of a sketch, then starts the feature on it. Shift-click takes an
+    area in (or out again) and waits for more (the user: several areas for one Extrude, Revolve…); a plain click
+    starts the feature on the areas taken and the one clicked."""
 
     def __init__(self, shell, kind, doc_name, body_name, source_name, names, faces):
         self.shell, self.kind = shell, kind
         self.doc_name, self.body_name, self.source_name, self.names, self.faces = doc_name, body_name, source_name, names, faces
+        self.picked = []
 
     def addSelection(self, doc_name, obj_name, sub, pnt):
-        if doc_name == self.doc_name and obj_name in self.names:
-            index, shell = self.names.index(obj_name), self.shell
-            QtCore.QTimer.singleShot(0, lambda: shell._region_pick is self and shell._region_picked(self, index))
+        if doc_name != self.doc_name or obj_name not in self.names:
+            return
+        index, shell = self.names.index(obj_name), self.shell
+        if QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier:
+            QtCore.QTimer.singleShot(0, lambda: shell._region_pick is self and self.toggle(index))
+            return
+        chosen = sorted(set(self.picked) | {index})
+        QtCore.QTimer.singleShot(0, lambda: shell._region_pick is self and shell._region_picked(self, chosen))
+
+    def toggle(self, index):
+        import FreeCAD as App
+        import FreeCADGui as Gui
+        if index in self.picked:
+            self.picked.remove(index)
+        else:
+            self.picked.append(index)
+        try:
+            vo = App.getDocument(self.doc_name).getObject(self.names[index]).ViewObject
+            vo.ShapeColor = AREA_PICKED if index in self.picked else AREA_COLOUR
+        except Exception:
+            pass
+        Gui.Selection.clearSelection()  # the next click on it counts again
+        what = self.kind.TITLE.lower()
+        self.shell.status.set_prompt(
+            "%d areas taken: Shift-click more, or click one more to %s them, %s all (Esc cancels)" % (
+                len(self.picked), what, "⌘A" if host.MAC else "Ctrl+A")
+            if self.picked else _area_prompt(self.kind))
 
 
 class _ProfilePicker:
@@ -474,6 +540,7 @@ class Shell(QtCore.QObject):
         self.constraints_panel = None  # the sketch's Constraint List window
         self._solid_edit = None  # (document, Solid) edited with the others see-through (Edit on a Solid)
         self.projecting = False  # Project Geometry started: a pick on another Solid is copied in
+        self._hidden_plane = None  # (document, work plane) hidden while a sketch on it is edited
         self._solid_see = []  # [(root node, override material)] put on the other Solids meanwhile
         self.parameters_window = None  # the Parameters button's window (incad.ui.parameters_window)
         self._constraints_owner = None
@@ -1134,6 +1201,11 @@ class Shell(QtCore.QObject):
             import FreeCAD as App
             from incad.ui import wire_style
             wire_style.refresh(App.ActiveDocument, self.theme)  # Wireframe lines in the new theme's color
+            from incad.features import work
+            for d in App.listDocuments().values():  # work planes in the new theme's plane colour
+                for o in d.Objects:
+                    if o.TypeId == "PartDesign::Plane":
+                        work.quiet_look(o)
         except Exception as e:
             log.logger().warning("Wireframe lines: %s", e)
         if self.constraints_panel is not None:
@@ -1422,17 +1494,141 @@ class Shell(QtCore.QObject):
         except RuntimeError:
             return False
 
+    def _style_sketches(self, doc, editing):
+        """Sketches shown outside their edit drawn in the theme's sketch blue, 3 px (white lines were lost on a
+        light work plane and on the part)."""
+        if doc is None:
+            return
+        hex_color = themes.SKETCH_COLORS[self.theme or themes.current()]["SketchEdgeColor"].lstrip("#")
+        color = tuple(int(hex_color[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+        for o in doc.Objects:
+            if o.TypeId != "Sketcher::SketchObject" or o is editing or not o.Visibility:
+                continue
+            vo = getattr(o, "ViewObject", None)
+            if vo is None:
+                continue
+            try:
+                if any(abs(a - b) > 2e-3 for a, b in zip(vo.LineColor, color)):
+                    vo.LineColor = color
+                if abs(vo.LineWidth - themes.SHOWN_SKETCH_WIDTH) > 1e-6:
+                    vo.LineWidth = themes.SHOWN_SKETCH_WIDTH
+            except Exception:
+                pass
+
+    def _hide_sketch_plane(self, sk):
+        """The work plane a sketch is drawn on is hidden while the sketch is edited (it was seen to pick it) and
+        shown again after; a plane the user had hidden stays hidden."""
+        import FreeCAD as App
+        plane = None
+        for s in (getattr(sk, "AttachmentSupport", None) or []) if sk is not None else []:
+            if s and s[0] is not None and s[0].TypeId == "PartDesign::Plane":
+                plane = s[0]
+        held = self._hidden_plane
+        if held is not None and (plane is None or held != (plane.Document.Name, plane.Name)):
+            self._hidden_plane = None
+            d = App.listDocuments().get(held[0])
+            o = d.getObject(held[1]) if d is not None else None
+            if o is not None:
+                o.Visibility = True
+        if plane is not None and self._hidden_plane is None and plane.Visibility:
+            plane.Visibility = False
+            self._hidden_plane = (plane.Document.Name, plane.Name)
+
     def _project_other_at(self, view, viewport, x, y):
-        """A click while Project Geometry runs: on an edge or face of another Solid it is copied in (True); anything
-        else is FreeCAD's (False)."""
+        """A click while Project Geometry runs: on an edge or face of another Solid it is copied in; an edge seen
+        through a see-through plane is projected (the plane doesn't catch it); a plane clicked where nothing is
+        behind it gives its line in the sketch; the sketch's own plane lets the click through (True for these).
+        Anything else is FreeCAD's (False)."""
         from incad.ui.nav import to_coin
         try:
-            info = view.getObjectInfo(to_coin(viewport, x, y))
+            hits = view.getObjectsInfo(to_coin(viewport, x, y)) or []
         except Exception:
-            info = None
-        if not info or not str(info.get("Component", "")).startswith(("Edge", "Face")):
+            hits = []
+        sk = self.sketches.editing()
+        if sk is None or not hits:
             return False
-        return self.copy_foreign_pick(info.get("Document", ""), info.get("Object", ""), info["Component"])
+        own = {s[0].Name for s in (getattr(sk, "AttachmentSupport", None) or []) if s and s[0] is not None}
+        solid = [h for h in hits if self._plane_hit(sk, h) is None and h.get("Object") not in own]
+        edge = next((h for h in solid if str(h.get("Component", "")).startswith(("Edge", "Vertex"))), None)
+        planes_first = solid[:1] != hits[:1]  # a see-through plane lies in front of what was clicked
+        if edge is not None and (planes_first or edge is hits[0]):
+            info = edge  # an edge seen through a plane wins over the plane (the user clicked the edge)
+        elif not planes_first:
+            info = hits[0]
+        else:
+            plane = self._plane_hit(sk, hits[0])
+            if plane is not None and plane.Name not in own:
+                return self._project_plane(sk, plane)
+            if not solid:
+                return True  # only the sketch's own plane there: nothing to project (FreeCAD would say it failed)
+            info = solid[0]  # through the sketch's own plane to the face behind it
+        if not str(info.get("Component", "")).startswith(("Edge", "Face", "Vertex")):
+            return False
+        if self.copy_foreign_pick(info.get("Document", ""), info.get("Object", ""), info["Component"]):
+            return True
+        if info is hits[0]:
+            return False  # a plain click on the part: FreeCAD's own tool projects it
+        return self._project_behind(sk, info)
+
+    @staticmethod
+    def _plane_hit(sk, info):
+        """The work or origin plane a Project Geometry click landed on (not the sketch's own), or None."""
+        if sk is None or not info:
+            return None
+        doc = sk.Document
+        obj = doc.getObject(info.get("Object", "") or "")
+        sub = str(info.get("Component", "") or "")
+        if obj is not None and obj.TypeId == "App::Origin" and sub:
+            obj = doc.getObject(sub.split(".")[0])
+        elif obj is not None and "." in sub:
+            obj = doc.getObject(sub.split(".")[-2]) or obj
+        if obj is None or obj.TypeId not in ("PartDesign::Plane", "App::Plane"):
+            return None
+        return obj
+
+    @staticmethod
+    def _project_plane(sk, plane):
+        """Project Geometry on a plane: where it cuts the sketch, a construction line that follows the plane (a
+        plane square to the sketch is FreeCAD's own projection; one at another angle is our own plane-cut line)."""
+        from incad.core import plane_cut, safe
+        doc = sk.Document
+
+        def linked():
+            sk.addExternal(plane.Name, "")
+            sk.recompute()
+
+        def cut():
+            if plane_cut.add(sk, plane) is None:
+                raise ValueError("%s is parallel to the sketch: it has no line in it" % plane.Label)
+            sk.recompute()
+        if safe.run_safely("Project Geometry", linked, doc, only=[sk]).ok:
+            return True
+        r = safe.run_safely("Project Geometry", cut, doc, only=[sk])
+        if not r.ok:
+            log.report("info", r.error)
+        return True
+
+    @staticmethod
+    def _project_behind(sk, info):
+        """Project Geometry clicked through the sketch's own work plane onto the part behind it: that element
+        projected, as FreeCAD's tool does with a click on it."""
+        from incad.core import safe
+        doc = sk.Document
+        obj = doc.getObject(info.get("Object", ""))
+        sub = info["Component"]
+        if "." in sub:
+            parts = sub.split(".")
+            obj, sub = doc.getObject(parts[-2]) or obj, parts[-1]
+        if obj is None:
+            return True
+
+        def project():
+            sk.addExternal(obj.Name, sub)
+            sk.recompute()
+        r = safe.run_safely("Project Geometry", project, doc, only=[sk])
+        if not r.ok:
+            log.report("warning", r.error)
+        return True
 
     def copy_foreign_pick(self, doc_name, obj_name, sub):
         """Project Geometry clicked an edge or face of another Solid, which FreeCAD will not link into the open
@@ -1674,6 +1870,12 @@ class Shell(QtCore.QObject):
         self._esc.triggered.connect(self._on_escape)
         self.mw.addAction(self._esc)
         self._shortcuts["_esc"] = self._esc
+        self._all_areas = QAction("All Areas", self.mw)  # ⌘A / Ctrl+A while an area is picked: every area, at once
+        self._all_areas.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.SelectAll))
+        self._all_areas.setEnabled(False)
+        self._all_areas.triggered.connect(self._take_all_areas)
+        self.mw.addAction(self._all_areas)
+        self._shortcuts["_all_areas"] = self._all_areas
 
     def _on_escape(self):
         """Esc, Inventor style: the value box first, then InCad's own picks and tools, then the feature dialog,
@@ -2167,6 +2369,8 @@ class Shell(QtCore.QObject):
         if self.sketches.editing() is not sk:
             return
         # Inventor: place the dimension first, then type. The box waits until the tool has put it down.
+        if len(added) == 1 and not drawn and not placing and self._over_defined(sk, added[0]):
+            return
         if len(added) == 1 and not drawn:
             if placing:
                 self._box_pending = (key, added[0], sk)
@@ -2195,9 +2399,35 @@ class Shell(QtCore.QObject):
                 self._box_pending = None
             return
         self._box_pending = None
+        if self._over_defined(sk, name):
+            return
         self.open_value_box(sk, name)
         if self.value_box is not None:
             self.value_box.restart_tool = "sketch.dimension"  # the tool stops when the value is applied
+
+    def _over_defined(self, sk, name):
+        """A new dimension the sketch fixes already (it stopped solving: 'Sketch with redundant constraints'): ask, and
+        make it a reference dimension or take it off. True when it was one (no value box then)."""
+        from incad.core import safe
+        from incad.core import sketch as sketches
+        index = next((i for i, c in enumerate(sk.Constraints) if c.Name == name), None)
+        if index is None or not sketches.over_defines(sk, index):
+            return False
+        size = sketches.document._format(sk.getDatum(index))
+        keep = (REFERENCE_ASK or (lambda text: QtWidgets.QMessageBox.question(
+            self.mw, host.app_name(), text, QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes) == QtWidgets.QMessageBox.Yes))(
+            "This size (%s) is set by the sketch already. Add it as a reference dimension (it shows the size, "
+            "drives nothing)?" % size)
+        if keep:
+            r = safe.run_safely("Reference Dimension", lambda: sketches.as_reference(sk, index), sk.Document,
+                                only=[sk])
+        else:
+            r = safe.run_safely("Remove Dimension", lambda: sk.delConstraint(index), sk.Document, only=[sk])
+        if not r.ok:
+            log.report("warning", r.error)
+        self._dim_known[(sk.Document.Name, sk.Name)] = sketches.dimension_snapshot(sk)
+        return True
 
     @perf.timed("after undo")
     def _after_undo(self, doc):
@@ -2695,8 +2925,8 @@ class Shell(QtCore.QObject):
         faces = regions.regions(source)
         if not faces:
             raise ValueError("%s has no closed area to %s" % (source.Label, kind.TITLE.lower()))
-        if len(faces) == 1 or regions.islands(faces):  # one area, or separate shapes (a pattern of polygons): all
-            prof = regions.make_profile(doc, body, source, faces if len(faces) > 1 else faces[0])
+        if len(faces) == 1:  # one area: used at once (separate shapes are picked too now; ⌘A takes them all)
+            prof = regions.make_profile(doc, body, source, faces[0])
             self._open_session(kind, doc, body, profile=prof)
             return
         self._cancel_region_pick()
@@ -2712,7 +2942,7 @@ class Shell(QtCore.QObject):
             o.Shape = shape
             try:
                 vo = o.ViewObject
-                vo.ShapeColor = (0.95, 0.62, 0.29)
+                vo.ShapeColor = AREA_COLOUR
                 vo.Transparency = 55
                 vo.LineWidth = 1.0
             except Exception:
@@ -2723,7 +2953,7 @@ class Shell(QtCore.QObject):
         self._region_pick = _RegionPicker(self, kind, doc.Name, body.Name, source.Name, names, faces)
         Gui.Selection.clearSelection()
         Gui.Selection.addObserver(self._region_pick)
-        self.status.set_prompt("Click the area to %s (Esc cancels)" % kind.TITLE.lower())
+        self.status.set_prompt(_area_prompt(kind))
         log.report("info", "%d areas: click the one to %s" % (len(faces), kind.TITLE.lower()))
         self.schedule_refresh()
 
@@ -2766,10 +2996,17 @@ class Shell(QtCore.QObject):
             doc.recompute()
         self.schedule_refresh()
 
-    def _region_picked(self, pick, index):
+    def _take_all_areas(self):
+        """⌘A / Ctrl+A while the areas are shown: the feature on all of them."""
+        pick = self._region_pick
+        if pick is not None:
+            self._region_picked(pick, list(range(len(pick.faces))))
+
+    def _region_picked(self, pick, indices):
         import FreeCAD as App
         from incad.core import regions
-        face, kind = pick.faces[index], pick.kind
+        faces, kind = [pick.faces[i] for i in indices], pick.kind
+        face = faces if len(faces) > 1 else faces[0]
         doc = App.getDocument(pick.doc_name)
         self._cancel_region_pick()
         body, source = doc.getObject(pick.body_name), doc.getObject(pick.source_name)
@@ -2819,9 +3056,12 @@ class Shell(QtCore.QObject):
             self._begin_profile_pick(kind)
             return
         body = document.target_body(profile) or body  # a sketch on a face of a second Solid: the feature goes there
-        from incad.core import regions
+        from incad.core import regions, sketch
         from incad.features import sketch_text
-        if not sketch_text.is_text(profile) and regions.needs_regions(profile):  # (letters are faces already)
+        # the areas to pick from: where the lines cross, and where a clean sketch has several closed areas (the user,
+        # 2026-11-07: two circles, a ring, a row of shapes - each area on its own, picked the same way)
+        if not sketch_text.is_text(profile) and sketch.is_sketch(profile) and \
+                (regions.needs_regions(profile) or len(regions.regions(profile)) > 1):  # (letters are faces already)
             self._profile_from_areas(kind, doc, body, profile)
             return
         self._open_session(kind, doc, body, profile=profile)
@@ -3067,6 +3307,10 @@ class Shell(QtCore.QObject):
         if getattr(self, "_esc_computing", None) is None:
             self._esc_computing = _EscWhileComputing(self.mw)
             QtWidgets.QApplication.instance().installEventFilter(self._esc_computing)
+        if getattr(self, "_value_styler", None) is None:  # a sketch tool's sizes at the pointer: one look for all
+            from incad.ui import value_fields
+            self._value_styler = value_fields.Styler(self.mw)
+            QtWidgets.QApplication.instance().installEventFilter(self._value_styler)
         if self._sel_watch is None:
             self._sel_watch = _SelectionWatch(self)
             Gui.Selection.addObserver(self._sel_watch)
@@ -3227,13 +3471,11 @@ class Shell(QtCore.QObject):
                     if sk.TypeId != "Sketcher::SketchObject":
                         continue
                     try:
-                        peeked = self._peeked is not None and self._peeked[1] == sk.Name
                         if not sk.Visibility and document.SHOWN_PROP not in sk.PropertiesList \
                                 and document.sketch_shown(sk):
                             sk.Visibility = True
-                        if sk.Visibility and (peeked or document.SHOWN_PROP in sk.PropertiesList
-                                              or document.is_unused_sketch(sk)):
-                            points.extend(sketches.key_points(sk))
+                        # no points in the plain view (the user: "some dots are glowing again"; they are for the
+                        # building commands, whose dialogs draw their own)
                     except Exception as e:
                         log.logger().warning("Key points of %s: %s", sk.Name, e)
         if doc is None:
@@ -3348,6 +3590,8 @@ class Shell(QtCore.QObject):
         except Exception as e:
             log.logger().warning("Display quality: %s", e)
         self.sketches.sync()
+        self._hide_sketch_plane(editing)
+        self._style_sketches(doc if is_part else None, editing)
         if is_part and editing is None and fs is None and self._body_hidden(doc):
             document.show_result(document.primary_body(doc))  # a file saved during sketch editing opens blank
         self._visibility_applied &= set(App.listDocuments())  # a closed file opened again is a new document
@@ -3480,12 +3724,15 @@ class Shell(QtCore.QObject):
         if doc is not None and self._point_pick is None:
             self._purge_old_markers(doc)
         if self._region_pick is not None:
-            self.status.set_prompt("Click the area to %s (Esc cancels)" % self._region_pick.kind.TITLE.lower())
+            self.status.set_prompt(_area_prompt(self._region_pick.kind))
         if self._point_pick is not None:
             pick = self._point_pick
             self.status.set_prompt(pick.prompt if not pick.picked else
                                    "%d of %d points picked (Esc cancels)" % (len(pick.picked), pick.count))
         for cmd_id, act in self._shortcuts.items():
+            if cmd_id == "_all_areas":
+                act.setEnabled(self._region_pick is not None)
+                continue
             if cmd_id == "_esc":
                 act.setEnabled(mode == "sketch" or self.sketches.picking or self._profile_pick is not None or
                                getattr(self, "slot_tool", None) is not None or self.feature_session is not None
@@ -4736,8 +4983,10 @@ class Shell(QtCore.QObject):
             drop.add("sketch.constraints_window")  # its own Constraints (n)… instead, filtered to it
             if geo is None or geo < 0 or not sketch_patterns.pattern_of(sk, geo):
                 drop |= {"sketch.edit_pattern", "sketch.delete_pattern"}
+            if geo is None or geo > -3:
+                drop.add("sketch.break_link")  # only on a projected edge
         else:
-            drop |= {"sketch.construction", "sketch.edit_pattern", "sketch.delete_pattern"}
+            drop |= {"sketch.construction", "sketch.edit_pattern", "sketch.delete_pattern", "sketch.break_link"}
         if not picked:
             drop.add("edit.delete")  # the user: Delete for selected lines AND dimensions
         if self.slot_tool is None and not self._sketch_tool_active():
@@ -4932,6 +5181,7 @@ def _finish_open_tools():
 
 
 UPDATE_ASK = None  # tests: callable(assembly label) -> True to update
+REFERENCE_ASK = None  # tests: a function(text) -> keep as a reference (True) instead of the question
 CONFIRM = None  # tests: callable(title, text) -> True for Yes
 
 

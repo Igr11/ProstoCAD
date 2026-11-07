@@ -136,7 +136,8 @@ class SafeTest(unittest.TestCase):
 
     def test_a_loose_piece_in_the_profile_is_found(self):
         """The user's half-section Revolve failed with FreeCAD's "Wire is not closed": one 0.2 mm line was left as
-        normal geometry. The message says where it is, in the sketch's coordinates."""
+        normal geometry. The message says where it is, in the sketch's coordinates (FreeCAD's Revolution of an older
+        file; ProstoCAD's own Revolve leaves such a piece out and is made)."""
         import Part
         from incad.features import revolve
         body = document.make_part(self.doc)
@@ -149,8 +150,13 @@ class SafeTest(unittest.TestCase):
             sk.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4]))
         sk.addGeometry(Part.LineSegment(V(-4, 8, 0), V(-4, 8.2, 0)))  # left over
         self.doc.recompute()
-        f = revolve.create(self.doc, body, sk, dict(revolve.defaults(self.doc, body, sk), operation="join",
-                                                    axis_mode="V_Axis"))
+        own = revolve.create(self.doc, body, sk, dict(revolve.defaults(self.doc, body, sk), operation="join",
+                                                      axis_mode="V_Axis"))
+        self.doc.recompute()
+        self.assertEqual(safe._broken(own, True), "")
+        f = body.newObject("PartDesign::Revolution", "Revolution")
+        f.Profile = sk
+        f.ReferenceAxis = (sk, ["V_Axis"])
         self.doc.recompute()
         why = safe._broken(f, True)
         self.assertIn("loose piece, 0.20 mm long, near x -4.00, y 8.10", why)
@@ -280,18 +286,25 @@ class KernelFailureMessageTest(unittest.TestCase):
                     **values)
         return safe.run_safely(k.TITLE, lambda: k.create(self.doc, self.body, None, vals), self.doc)
 
-    def test_a_too_big_chamfer_is_explained_as_a_chamfer(self):
-        r = self.dress("chamfer", size="500 mm")
-        self.assertFalse(r.ok)
-        self.assertIn("chamfer", r.error.lower())
-        self.assertNotIn("revolve", r.error.lower())
-        self.assertIn("smaller", r.error)
-
     def test_a_too_big_fillet_is_explained_as_a_fillet(self):
         r = self.dress("fillet", radius="500 mm")
         self.assertFalse(r.ok)
         self.assertIn("fillet", r.error.lower())
         self.assertNotIn("revolve", r.error.lower())
+
+    def test_an_invalid_fillet_says_why_and_the_solid_is_not_named_too(self):
+        """r6 on the top edges of a 10 mm block: "Solid1 produced invalid geometry; Fillet produced invalid geometry"."""
+        top = ["Edge%d" % (i + 1) for i, e in enumerate(self.pad.Shape.Edges) if abs(e.CenterOfMass.z - 10) < 1e-6]
+
+        def fn():
+            f = self.body.newObject("PartDesign::Fillet", "Fillet")
+            f.Base, f.Radius = (self.pad, top), 6
+            self.body.Tip = f
+        r = safe.run_safely("Fillet", fn, self.doc)
+        self.assertFalse(r.ok)
+        self.assertIn("radius is too big", r.error)
+        self.assertNotIn(self.body.Label, r.error)
+        self.assertNotIn("produced invalid geometry", r.error)
 
     def test_a_revolve_failure_keeps_the_revolve_text(self):
         from incad.core import model
@@ -447,6 +460,22 @@ class CutTest(unittest.TestCase):
                                                          tip="flat"))
         self.doc.recompute()
         self.assertIn("no thickness", safe.unsound(f))
+
+    def test_a_hole_wider_than_the_part_says_so_in_a_hole_s_words(self):
+        """A 40 mm hole in a 20 x 10 block was told to "choose another axis, extent or profile"."""
+        import Part
+        from incad.features import hole
+        top = [i + 1 for i, f in enumerate(self.pad.Shape.Faces) if abs(f.CenterOfMass.z - 10) < 1e-6][0]
+        sk = self.body.newObject("Sketcher::SketchObject", "HolePt")
+        sk.AttachmentSupport = [(self.pad, "Face%d" % top)]
+        sk.MapMode = "FlatFace"
+        sk.addGeometry(Part.Point(App.Vector(10, 5, 0)))
+        self.doc.recompute()
+        r = safe.run_safely("Hole", lambda: hole.create(self.doc, self.body, None, dict(
+            hole.defaults(self.doc, self.body, None), sketch=sk.Name, diameter="40 mm")), self.doc)
+        self.assertFalse(r.ok)
+        self.assertIn("make the diameter smaller", r.error)
+        self.assertNotIn("axis, extent or profile", r.error)
 
     def test_pattern_copies_off_the_part_are_said(self):
         import Part

@@ -74,7 +74,13 @@ def linked_mirror(obj):
         return None
     if obj.TypeId == "PartDesign::Body":
         return next((o for o in obj.Group if claims(o) and result_of(o) == "new"), None)  # the copy's Solid
-    return obj if claims(obj) or obj.TypeId == "PartDesign::Mirrored" else None
+    return obj if claims(obj) or _feature_mirror(obj) else None
+
+
+def _feature_mirror(obj):
+    """A feature Mirror: FreeCAD's (an older file) or ProstoCAD's own Pattern of kind mirror."""
+    from incad.features import own_pattern
+    return own_pattern.kind_of(obj) == "mirror" and not own_pattern.is_solid(obj)
 
 
 def is_linked(obj):
@@ -172,7 +178,7 @@ class MirrorSolidFeature:
         if base is not None and not base.Shape.isNull() and base.Shape.Solids:
             made = base.Shape.fuse(made)
         if len(made.Solids) == 1:
-            made = made.Solids[0]
+            made = sound(made.Solids[0])
         if hasattr(obj, "AddSubShape"):
             try:
                 obj.AddSubShape = made
@@ -208,6 +214,17 @@ _WAYS = (0.0, 1e-5, 1e-4, 1e-3, 3e-3, 1e-2)  # plain, then fuzzy (0.01 mm at mos
 # at a few places (the user's sweep about YZ) fell apart into four pieces plainly, one clean solid fuzzily
 
 
+def sound(solid):
+    """A joined solid with faces that only touch (a disc tangent to the plane meets its image along a line) made to
+    meet on a common edge, as our Extrude does it: the kernel called it valid, the full check faulty (faces crossing
+    themselves) and a later Shell or Fillet failed there. The solid as it was when that doesn't help."""
+    try:
+        from incad.core.extrude_solid import _faulty, _glued
+        return (_glued(solid) or solid) if _faulty(solid) else solid  # (_glued gives None when it can't)
+    except Exception:
+        return solid
+
+
 def _one_piece(shape, image, result):
     """shape joined with / cut by its mirror image, as one valid solid: the first way that gives one."""
     pieces = 0
@@ -230,7 +247,7 @@ def _one_piece(shape, image, result):
                 raise ValueError("Cut by its mirror image nothing is left: the Solid lies inside its image")
             continue
         if len(out.Solids) == 1 and out.isValid():
-            return out.Solids[0]
+            return sound(out.Solids[0])
         pieces = len(out.Solids)
     if result == "join" and shape.distToShape(image)[0] > 1e-6:
         raise ValueError("The Solid and its mirror image do not touch: pick a plane on (or through) the Solid, "
@@ -264,7 +281,7 @@ class FrozenMirrorFeature:
             return
         shape = shape.removeSplitter()
         if len(shape.Solids) == 1:
-            shape = shape.Solids[0]
+            shape = sound(shape.Solids[0])
         obj.Shape = shape
 
     def dumps(self):
@@ -437,7 +454,7 @@ def break_link(f):
         f.Label = "%s (unlinked)" % f.Label
         doc.recompute()
         return f
-    if f.TypeId != "PartDesign::Mirrored":
+    if not _feature_mirror(f):
         raise ValueError("%s is not a mirror" % f.Label)
     return _freeze_feature_mirror(f)
 

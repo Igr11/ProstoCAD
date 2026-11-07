@@ -1,9 +1,12 @@
-"""Rectangular / Circular Pattern and Mirror (Inventor) = PartDesign LinearPattern (two directions, Extent mode:
-probed — the second direction ignores Spacing mode), PolarPattern and Mirrored."""
+"""Rectangular / Circular Pattern and Mirror (Inventor): the dialogs of InCad's own Pattern on OpenCASCADE
+(incad.features.own_pattern): the picked features, or a whole Solid (joined into it, as a new Solid, or a new Solid
+per copy). FreeCAD's LinearPattern (two directions, Extent mode: probed — the second direction ignores Spacing mode),
+PolarPattern and Mirrored of older files open as they are and become our own when their dialog changes them."""
 import json
 import re
 from types import SimpleNamespace
 
+from incad.features import own_pattern
 from incad.features.common import (Field, built_on_features, format_picks, parse_picks, repeatable_of, resolve,
                                    value_param, value_text)
 
@@ -87,7 +90,7 @@ def _picks_and_children(f):
 
 
 _PATTERNABLE = ("PartDesign::Pad", "PartDesign::Pocket", "PartDesign::Revolution", "PartDesign::Groove",
-                "PartDesign::Hole")
+                "PartDesign::Hole", "PartDesign::FeatureAdditivePython", "PartDesign::FeatureSubtractivePython")  # (the last two: ProstoCAD's own Extrude, Revolve)
 
 
 def _dir_link(doc, body, text, default_role):
@@ -178,9 +181,19 @@ def _limit(doc, text):
     return obj, sub, point
 
 
-def _extent_along(originals, direction):
-    """(lo, hi) of what the originals add or remove, measured along `direction`."""
+def _extent_along(originals, direction, solid=None):
+    """(lo, hi) of what the originals add or remove (or of the whole `solid`), measured along `direction`."""
+    import FreeCAD as App
     lo, hi = None, None
+    if solid is not None:
+        box = solid.BoundBox
+        for x in (box.XMin, box.XMax):
+            for y in (box.YMin, box.YMax):
+                for z in (box.ZMin, box.ZMax):
+                    t = App.Vector(x, y, z).dot(direction)
+                    lo = t if lo is None else min(lo, t)
+                    hi = t if hi is None else max(hi, t)
+        return lo, hi
     for o in originals:
         base = getattr(o, "BaseFeature", None)
         if base is None or base.Shape.isNull() or o.Shape.isNull():
@@ -257,7 +270,7 @@ def _fit_spacing(doc, body, f, values):
     start = _limit(doc, values.get("from1"))
     originals = list(f.Originals)
     link, direction = _fit_direction(doc, body, f, values, start, end, originals)
-    lo, hi = _extent_along(originals, direction)
+    lo, hi = _extent_along(originals, direction, own_pattern.source_shape(f) if own_pattern.is_solid(f) else None)
     t_end = end[2].dot(direction)
     t_start = start[2].dot(direction) if start is not None else (lo if t_end > (lo + hi) / 2.0 else hi)
     sign = 1.0 if t_end >= t_start else -1.0  # the copies run from the start toward the end
@@ -300,9 +313,11 @@ def _load_fit(f):
 
 
 def _rect_apply(doc, body, f, values):
-    f.Originals = _features(doc, body, values.get("features"), f, bool(values.get("children")))
+    if not own_pattern.is_solid(f):
+        f.Originals = _features(doc, body, values.get("features"), f, bool(values.get("children")))
     f.Direction = _dir_link(doc, body, values.get("dir1"), "X_Axis")
-    f.Mode = "Extent"
+    if "Mode" in f.PropertiesList:  # FreeCAD's (ours has no Spacing mode)
+        f.Mode = "Extent"
     _count(doc, f, "Occurrences", values.get("count1"))
     spacing1 = values.get("spacing1") or "10 mm"
     if values.get("fit1") == "faces":
@@ -310,12 +325,16 @@ def _rect_apply(doc, body, f, values):
         doc.recompute()
         spacing1 = _fit_spacing(doc, body, f, values)
     else:
-        f.Reversed = bool(values.get("flip1"))
+        flip = bool(values.get("flip1"))
+        if spacing1.strip().startswith("-"):  # a minus spacing goes the other way, as in a professional CAD (it
+            flip, spacing1 = not flip, spacing1.strip()[1:].strip()  # was taken silently, refused only on OK)
+        f.Reversed = flip
     _length_from(doc, f, "Length", "Occurrences", spacing1, "spacing1")
     _store_fit(f, values)
     if values.get("two_directions"):
         f.Direction2 = _dir_link(doc, body, values.get("dir2"), "Y_Axis")
-        f.Mode2 = "Extent"
+        if "Mode2" in f.PropertiesList:
+            f.Mode2 = "Extent"
         _count(doc, f, "Occurrences2", values.get("count2"))
         _length_from(doc, f, "Length2", "Occurrences2", values.get("spacing2") or "10 mm", "spacing2")
     else:
@@ -323,15 +342,114 @@ def _rect_apply(doc, body, f, values):
         f.Occurrences2 = 1
 
 
-def _rect_create(doc, body, profile, values):
-    f = body.newObject("PartDesign::LinearPattern", "RectangularPattern")
-    _rect_apply(doc, body, f, values)
-    body.Tip = f  # probed: newObject leaves the Tip on the previous feature for transformed features
+MODES = (("features", "Features"), ("solid", "Solid"))
+RESULTS = (("join", "Join"), ("new", "New Solid"), ("each", "New Solid per copy"))
+
+
+def _mode_fields(results=RESULTS):
+    """Features (the picked ones) or a whole Solid, and what becomes of the Solid's copies."""
+    return (Field("mode", "Pattern", "choice", MODES, "features"),
+            Field("solid", "Solid", "pick", pick="body", show_if=("mode", ("solid",))),
+            Field("result", "Result", "choice", results, "join", show_if=("mode", ("solid",))))
+
+
+def _mode_defaults(doc):
+    """The part's only Solid is the one repeated; with several the dialog waits for a click on one."""
+    from incad.core import document
+    full = [b for b in document.bodies(doc) if not b.Shape.isNull() and b.Shape.Solids]
+    return {"mode": "features", "solid": full[0].Name if len(full) == 1 else "", "result": "join"}
+
+
+def _mode_read(f):
+    if not own_pattern.is_solid(f):
+        return {"mode": "features", "solid": "", "result": "join"}
+    result = own_pattern.result_of(f)
+    src = f.getParentGeoFeatureGroup() if result == "join" else f.Source
+    return {"mode": "solid", "solid": src.Name if src is not None else "", "result": result}
+
+
+def _source(doc, values):
+    from incad.core import document
+    picks = parse_picks(doc, values.get("solid"))
+    b = picks[0][0] if picks else None
+    if b is not None and b.TypeId != "PartDesign::Body":
+        b = document.body_of(resolve(*picks[0])[0])
+    if b is None or b.TypeId != "PartDesign::Body":
+        raise ValueError("Pick the Solid to repeat")
+    return b
+
+
+def _exclude(doc, f, values):
+    """New Solid per copy: a Solid for each copy (copies can't be left out in the add-on's dialog yet)."""
+    if own_pattern.result_of(f) == "each" and f.Name not in own_pattern.GHOST:  # (drawn while the dialog is open:
+        own_pattern.sync_each(doc, f)                                          # the Solids are made on OK)
+
+
+def _make(doc, body, values, kind, apply):
+    """A new pattern of ours: the picked features in `body`, or the picked Solid (see own_pattern); taken away
+    again when its values can't make it."""
+    if (values.get("mode") or "features") == "solid":
+        src = _source(doc, values)
+        result = values.get("result") or "join"
+        if kind == "mirror" and result == "each":
+            result = "new"  # one copy
+        tip = src.Tip
+        f = own_pattern.new_in_solid(doc, kind, None, result, src)
+        body = src
+    else:
+        _features(doc, body, values.get("features"), SimpleNamespace(Originals=[]))  # asked for before it is made
+        tip = body.Tip
+        f = own_pattern.new(doc, body, kind)
+    try:
+        apply(doc, body, f, values)
+        _exclude(doc, f, values)
+    except Exception:
+        _unmake(doc, f, tip)
+        raise
     return f
+
+
+def _unmake(doc, f, tip):
+    for g in own_pattern.group_of(f):
+        owner = g.getParentGeoFeatureGroup()
+        if own_pattern.result_of(g) in ("new", "each"):
+            from incad.features.solid_mirror import _drop_body
+            _drop_body(doc, owner)
+            continue
+        owner.removeObject(g)
+        doc.removeObject(g.Name)
+        owner.Tip = tip
+
+
+def _edit(doc, f, values, apply):
+    """Values onto a pattern: FreeCAD's of an older file becomes ours first (same values, place and name)."""
+    if own_pattern.is_own(f):
+        f = own_pattern.lead_of(f)
+    else:
+        f = own_pattern.convert(doc, f)
+    result = own_pattern.result_of(f)
+    body = f.getParentGeoFeatureGroup()
+    if result in ("new", "each"):
+        src = _source(doc, values)
+        if src is body or own_pattern.group_of(f)[0].getParentGeoFeatureGroup() is src:
+            raise ValueError("A pattern can't repeat its own Solid as a new Solid: pick another Solid")
+        if f.Source is not src:
+            f.Source = src
+        body = src
+    elif result == "join" and values.get("solid") and _source(doc, values) is not body:
+        raise ValueError("A Join pattern stays in its Solid: to repeat another Solid, make a new pattern")
+    apply(doc, body, f, values)
+    _exclude(doc, f, values)
+    return f
+
+
+def _rect_create(doc, body, profile, values):
+    return _make(doc, body, values, "rectangular", _rect_apply)
 
 
 def _rect_read(doc, f):
     from incad.core import model
+    f = own_pattern.lead_of(f)
     def spacing(key):
         name = spacing_param_from(f, key)
         return model.parameter_text(doc, name) if name else "10 mm"
@@ -340,20 +458,26 @@ def _rect_read(doc, f):
     return {"features": picks, "children": children, **_load_fit(f), "dir1": _link_text(f.Direction),
             "count1": value_text(doc, f, "Occurrences") or "2", "spacing1": spacing("spacing1"),
             "two_directions": bool(two), "dir2": _link_text(f.Direction2),
-            "count2": value_text(doc, f, "Occurrences2") or "2", "spacing2": spacing("spacing2")}
+            "count2": value_text(doc, f, "Occurrences2") or "2", "spacing2": spacing("spacing2"), **_mode_read(f)}
 
 
 def _rect_update(doc, f, values):
-    _rect_apply(doc, f.getParentGeoFeatureGroup(), f, values)
-    return f
+    return _edit(doc, f, values, _rect_apply)
 
+
+_FEATURES = ("mode", ("features",))
+_EDIT_LOCKED = ("mode", "result")  # a step in the Solid or Solids of their own: made again, fixed once made
 
 RECT = SimpleNamespace(
     __name__="incad.features.rect_pattern", TITLE="Rectangular Pattern", ICON="rect_pattern3d",
-    TYPES=("PartDesign::LinearPattern",), NEEDS_PROFILE=False, PROPS={"count1": "Occurrences", "count2": "Occurrences2"},
+    TYPES=("PartDesign::LinearPattern", "PartDesign::FeaturePython"),
+    claims=lambda f: own_pattern.kind_of(f) == "rectangular", RECREATE_ON=("mode", "result", "solid"),
+    LOCKED_WHEN_EDITING=_EDIT_LOCKED,
+    NEEDS_PROFILE=False, PROPS={"count1": "Occurrences", "count2": "Occurrences2"},
     PRESELECT={"features": "feature"}, spacing_param=lambda f, n: spacing_param_from(f, "spacing%d" % n),
-    FIELDS=(Field("features", "Features", "picks", pick="feature"),
-            Field("children", "Include dependent features", "bool", default=False),
+    FIELDS=_mode_fields() + (
+            Field("features", "Features", "picks", pick="feature", show_if=_FEATURES),
+            Field("children", "Include dependent features", "bool", default=False, show_if=_FEATURES),
             Field("fit1", "Distribution", "choice", (("spacing", "By spacing"), ("faces", "Equal spacing")),
                   "spacing"),
             Field("dir1", "Direction 1", "pick", pick="axis", show_if=("fit1", ("spacing",))),
@@ -368,9 +492,10 @@ RECT = SimpleNamespace(
             Field("spacing2", "Spacing 2", "value_length", default="10 mm", show_if=("two_directions", (True,)))),
     defaults=lambda doc, body, profile: {"features": "", "children": False, "dir1": _origin_name(body, "X_Axis"), "count1": "2",
                                          "fit1": "spacing", "from1": "", "to1": "", "flip1": False, "spacing1": "10 mm", "two_directions": False,
-                                         "dir2": _origin_name(body, "Y_Axis"), "count2": "2", "spacing2": "10 mm"},
-    param_names=lambda f: {k: spacing_param_from(f, k) for k in ("spacing1", "spacing2")
-                           if spacing_param_from(f, k)},
+                                         "dir2": _origin_name(body, "Y_Axis"), "count2": "2", "spacing2": "10 mm",
+                                         **_mode_defaults(doc)},
+    param_names=lambda f: {k: spacing_param_from(own_pattern.lead_of(f), k) for k in ("spacing1", "spacing2")
+                           if spacing_param_from(own_pattern.lead_of(f), k)},
     create=_rect_create, read=_rect_read, update=_rect_update, summary=_summary, _pad_of=lambda f: f)
 
 
@@ -399,26 +524,26 @@ def _rot_axis(doc, body, f, values):
 
 
 def _circ_apply(doc, body, f, values):
-    f.Originals = _features(doc, body, values.get("features"), f, bool(values.get("children")))
+    if not own_pattern.is_solid(f):
+        f.Originals = _features(doc, body, values.get("features"), f, bool(values.get("children")))
     f.Axis = _rot_axis(doc, body, f, values)
-    f.Mode = "Extent"
+    if "Mode" in f.PropertiesList:  # FreeCAD's (ours has no Spacing mode)
+        f.Mode = "Extent"
     _count(doc, f, "Occurrences", values.get("count"))
     value_param(doc, f, "Angle", values.get("angle") or "360 °", "angle")
 
 
 def _circ_create(doc, body, profile, values):
-    f = body.newObject("PartDesign::PolarPattern", "CircularPattern")
-    _circ_apply(doc, body, f, values)
-    body.Tip = f  # probed: newObject leaves the Tip on the previous feature for transformed features
-    return f
+    return _make(doc, body, values, "circular", _circ_apply)
 
 
 def _circ_read(doc, f):
+    f = own_pattern.lead_of(f)
     picks, children = _picks_and_children(f)
     from incad.features import revolve
     out = {"features": picks, "children": children, "axis_mode": "reference", "axis": _link_text(f.Axis),
            "axis_points": "", "count": value_text(doc, f, "Occurrences") or "4",
-           "angle": value_text(doc, f, "Angle") or "360°"}
+           "angle": value_text(doc, f, "Angle") or "360°", **_mode_read(f)}
     obj = f.Axis[0] if f.Axis else None
     if obj is not None and getattr(obj, revolve.HELPER, None) == f.Name:  # the axis through two points
         out.update(axis_mode="two_points", axis="", axis_points=getattr(obj, revolve.POINTS, ""))
@@ -426,16 +551,19 @@ def _circ_read(doc, f):
 
 
 def _circ_update(doc, f, values):
-    _circ_apply(doc, f.getParentGeoFeatureGroup(), f, values)
-    return f
+    return _edit(doc, f, values, _circ_apply)
 
 
 CIRC = SimpleNamespace(
     __name__="incad.features.circ_pattern", TITLE="Circular Pattern", ICON="circ_pattern",
-    TYPES=("PartDesign::PolarPattern",), NEEDS_PROFILE=False, PROPS={"count": "Occurrences", "angle": "Angle"},
+    TYPES=("PartDesign::PolarPattern", "PartDesign::FeaturePython"),
+    claims=lambda f: own_pattern.kind_of(f) == "circular", RECREATE_ON=("mode", "result", "solid"),
+    LOCKED_WHEN_EDITING=_EDIT_LOCKED,
+    NEEDS_PROFILE=False, PROPS={"count": "Occurrences", "angle": "Angle"},
     PRESELECT={"features": "feature"},
-    FIELDS=(Field("features", "Features", "picks", pick="feature"),
-            Field("children", "Include dependent features", "bool", default=False),
+    FIELDS=_mode_fields() + (
+            Field("features", "Features", "picks", pick="feature", show_if=_FEATURES),
+            Field("children", "Include dependent features", "bool", default=False, show_if=_FEATURES),
             Field("axis_mode", "Axis", "choice", (("reference", "Axis or edge"), ("two_points", "Two points")),
                   "reference"),
             Field("axis", "Pick", "pick", pick="rot_axis", show_if=("axis_mode", ("reference",))),
@@ -444,37 +572,78 @@ CIRC = SimpleNamespace(
             Field("angle", "Angle", "value_angle", default="360 °")),
     defaults=lambda doc, body, profile: {"features": "", "children": False, "axis_mode": "reference",
                                          "axis": _origin_name(body, "Z_Axis"), "axis_points": "", "count": "4",
-                                         "angle": "360 °"},
+                                         "angle": "360 °", **_mode_defaults(doc)},
     create=_circ_create, read=_circ_read, update=_circ_update, summary=_summary, _pad_of=lambda f: f)
 
 
 def _mirror_apply(doc, body, f, values):
-    f.Originals = _features(doc, body, values.get("features"), f, bool(values.get("children")))
+    if not own_pattern.is_solid(f):
+        f.Originals = _features(doc, body, values.get("features"), f, bool(values.get("children")))
     f.MirrorPlane = _dir_link(doc, body, values.get("plane"), "YZ_Plane")
 
 
 def _mirror_create(doc, body, profile, values):
-    f = body.newObject("PartDesign::Mirrored", "Mirror")
-    _mirror_apply(doc, body, f, values)
-    body.Tip = f  # probed: newObject leaves the Tip on the previous feature for transformed features
-    return f
+    return _make(doc, body, values, "mirror", _mirror_apply)
 
 
 def _mirror_read(doc, f):
     picks, children = _picks_and_children(f)
-    return {"features": picks, "children": children, "plane": _link_text(f.MirrorPlane)}
+    return {"features": picks, "children": children, "plane": _link_text(f.MirrorPlane), **_mode_read(f)}
 
 
 def _mirror_update(doc, f, values):
-    _mirror_apply(doc, f.getParentGeoFeatureGroup(), f, values)
-    return f
+    return _edit(doc, f, values, _mirror_apply)
 
 
 MIRROR = SimpleNamespace(
-    __name__="incad.features.mirror", TITLE="Mirror", ICON="mirror3d", TYPES=("PartDesign::Mirrored",),
+    __name__="incad.features.mirror", TITLE="Mirror", ICON="mirror3d",
+    TYPES=("PartDesign::Mirrored", "PartDesign::FeaturePython"),
+    claims=lambda f: own_pattern.kind_of(f) == "mirror", RECREATE_ON=("mode", "result", "solid"),
+    LOCKED_WHEN_EDITING=_EDIT_LOCKED,
     NEEDS_PROFILE=False, PROPS={}, PRESELECT={"features": "feature"},
-    FIELDS=(Field("features", "Features", "picks", pick="feature"),
-            Field("children", "Include dependent features", "bool", default=False),
+    FIELDS=_mode_fields(RESULTS[:2]) + (
+            Field("features", "Features", "picks", pick="feature", show_if=_FEATURES),
+            Field("children", "Include dependent features", "bool", default=False, show_if=_FEATURES),
             Field("plane", "Mirror plane", "pick", pick="plane")),
-    defaults=lambda doc, body, profile: {"features": "", "children": False, "plane": _origin_name(body, "YZ_Plane")},
+    defaults=lambda doc, body, profile: {"features": "", "children": False, "plane": _origin_name(body, "YZ_Plane"),
+                                         **_mode_defaults(doc)},
     create=_mirror_create, read=_mirror_read, update=_mirror_update, summary=_summary, _pad_of=lambda f: f)
+
+
+def _copies_too(doc, f):
+    """New Solid per copy: the other copies' steps (each in a Solid of its own), computed and shown with the
+    pattern while its dialog is open (only the first copy showed until OK)."""
+    if not own_pattern.is_own(f) or own_pattern.result_of(f) != "each" or f.Name in own_pattern.GHOST:
+        return []
+    return [s for s in own_pattern.group_of(f) if s is not f]
+
+
+def _built_on_ok(doc, f):
+    """OK: the pattern drawn as outlines is built now (and New Solid per copy gets its Solids)."""
+    if not own_pattern.is_own(f) or f.Name not in own_pattern.GHOST:
+        return
+    own_pattern.GHOST.discard(f.Name)
+    if own_pattern.result_of(f) == "each":
+        own_pattern.sync_each(doc, f)
+    f.touch()
+
+
+def _ghost(shell, session):
+    from incad.ui import pattern_ghost
+    return pattern_ghost.overlay(shell, session)
+
+
+def _next_pick(direction):
+    def hook(values):
+        """Solid picked (or the only one): the next click sets the axis / direction (it has a default)."""
+        return direction if values.get("mode") == "solid" and values.get("solid") else None
+    return hook
+
+
+RECT.next_pick = _next_pick("dir1")
+CIRC.next_pick = _next_pick("axis")
+MIRROR.next_pick = _next_pick("plane")
+for _kind in (RECT, CIRC, MIRROR):
+    _kind.companions = _copies_too
+    _kind.before_ok = _built_on_ok
+    _kind.overlay = _ghost

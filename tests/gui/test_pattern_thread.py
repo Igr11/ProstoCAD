@@ -11,6 +11,7 @@ from pivy import coin  # noqa: E402,F401
 from PySide6.QtTest import QTest  # noqa: E402
 from incad.qt import QtCore, QtWidgets  # noqa: E402
 from incad.core import commands, document, prefs  # noqa: E402
+from incad.features import own_pattern  # noqa: E402
 from incad.ui import shell  # noqa: E402
 import headless.util as util  # noqa: E402
 
@@ -77,7 +78,7 @@ def test_1_picking_the_thread_means_the_shaft_with_its_thread():
     assert shaft.Label in shown and "dependent" in shown, shown
     ok()
     pattern = body().Tip
-    assert pattern.TypeId == "PartDesign::LinearPattern", pattern.TypeId
+    assert own_pattern.is_own(pattern) and own_pattern.kind_of(pattern) == "rectangular", pattern.TypeId  # our own pattern
     assert [o.Name for o in pattern.Originals] == [shaft.Name, th.Name], [o.Name for o in pattern.Originals]
     assert pattern.Shape.BoundBox.YLength > 30, pattern.Shape.BoundBox
 

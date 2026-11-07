@@ -12,6 +12,34 @@ import FreeCAD as App
 from incad.features.common import Field, parse_picks, resolve
 
 _STORE = "InCadWork"
+QUIET = {"dark": (0.88, 0.92, 1.00), "light": (0.22, 0.30, 0.42)}  # a work plane: lighter than a dark view,
+SEE_THROUGH = 0.7  # darker than a light one, and see-through so the part shows through it
+
+
+def quiet_look(o):
+    """Draw work plane `o` in the theme's plane colour, see-through (FreeCAD's datum yellow hid the part)."""
+    vo = getattr(o, "ViewObject", None)
+    if vo is None:
+        return
+    try:
+        from incad.ui import theme
+        color = QUIET[theme.current()]
+    except Exception:
+        color = QUIET["dark"]
+    try:
+        mat = vo.ShapeAppearance[0]
+        if abs(mat.Transparency - SEE_THROUGH) < 1e-3 and all(abs(a - b) < 1e-3 for a, b in zip(mat.DiffuseColor, color)):
+            return  # in this look already (show_result calls it often: no redraw for nothing)
+        mat.DiffuseColor = color + (1.0,)
+        mat.Transparency = SEE_THROUGH
+        vo.ShapeAppearance = [mat]
+    except Exception:
+        pass
+    for prop, value in (("Transparency", round(SEE_THROUGH * 100)), ("LineColor", color)):
+        try:
+            setattr(vo, prop, value)
+        except Exception:
+            pass
 
 
 def _first(doc, text, what="what the work feature is based on"):
@@ -400,6 +428,7 @@ def _sync_series(doc, f, count, base):
     body = f.getParentGeoFeatureGroup()
     for k in range(len(have) + 2, count + 1):
         o = body.newObject("PartDesign::Plane", "WorkPlane")
+        quiet_look(o)
         o.AttachmentSupport = f.AttachmentSupport
         o.MapMode = "FlatFace"
         name = model.new_feature_parameter(doc, "%s * %d" % (pname, k), "length")
@@ -504,9 +533,37 @@ def _place_through(doc, body, f, pts):
     doc.recompute([f])
 
 
+def fit_size(f):
+    """Work plane `f` drawn just over the part (FreeCAD's automatic size spans the whole view), centred on the
+    part's middle as seen on the plane; 20 mm on an empty part."""
+    body = f.getParentGeoFeatureGroup()
+    shape = getattr(body, "Shape", None)
+    if "ResizeMode" not in f.PropertiesList:
+        return
+    pl = f.Placement
+    if shape is None or shape.isNull() or not shape.Solids:
+        size = 20.0
+    else:
+        inv = pl.inverse()
+        box = shape.BoundBox
+        pts = [inv.multVec(App.Vector(x, y, z)) for x in (box.XMin, box.XMax) for y in (box.YMin, box.YMax)
+               for z in (box.ZMin, box.ZMax)]
+        size = max(max(abs(p.x) for p in pts), max(abs(p.y) for p in pts)) * 2 * 1.1
+        size = min(max(size, 20.0), 1.1 * 2 * box.DiagonalLength)
+    try:
+        f.ResizeMode = "Manual"
+        f.Length = size
+        f.Width = size
+    except Exception:
+        pass
+
+
 def _plane_create(doc, body, profile, values):
     f = body.newObject("PartDesign::Plane", "WorkPlane")
+    quiet_look(f)
     _plane_apply(doc, body, f, values)
+    doc.recompute([f])
+    fit_size(f)
     return f
 
 
@@ -541,6 +598,8 @@ def _plane_read(doc, f):
 
 def _plane_update(doc, f, values):
     _plane_apply(doc, f.getParentGeoFeatureGroup(), f, values)
+    doc.recompute([f])
+    fit_size(f)
     return f
 
 

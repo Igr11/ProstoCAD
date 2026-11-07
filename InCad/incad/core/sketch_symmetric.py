@@ -214,6 +214,11 @@ def ties(sk, a, b, sym):
         raise ValueError("Both are projected and can't move: pick one of the sketch's own")
     s = _sym_args(sym)
     if ka == kb == "point":
+        if ks == "line":  # a point on the mirror line is its own mirror image: Symmetric can't hold it (FreeCAD:
+            for fixed, free in ((a, b), (b, a)):  # partially redundant, the finder), the other goes onto it
+                p = _point(sk, fixed[1], fixed[2])
+                if (_mirror(sk, sym, p) - p).Length < 1e-7:
+                    return [Sketcher.Constraint("Coincident", free[1], free[2], fixed[1], fixed[2])]
         return [Sketcher.Constraint("Symmetric", a[1], a[2], b[1], b[2], *s)]
     if ka == kb == "line":
         if a[1] in (H_AXIS, V_AXIS) or b[1] in (H_AXIS, V_AXIS):

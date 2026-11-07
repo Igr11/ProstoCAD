@@ -119,23 +119,19 @@ class KeyPointsTest(unittest.TestCase):
         self.doc.recompute()
         self.assertEqual(self._xy(sketch.key_points(s)), [("end", 0.0, 0.0, 7.0), ("end", 10.0, 0.0, 7.0)])
 
-    def test_projected_edges_are_marked_normal_or_construction(self):
-        """Projected edges are marked like drawn lines, construction ones too (the user's law: equal rights)."""
+    def test_projected_edges_are_marked_only_for_building_commands(self):
+        """Projected edges are the part's own edges: no points on them in the plain view (the user's air2: a ring of
+        dots round a projected disc), their ends in a feature dialog (building commands pick on them)."""
         src = _sketch(self.doc, "Src")
         src.addGeometry(Part.LineSegment(App.Vector(0, 0, 0), App.Vector(10, 0, 0)))
-        src.addGeometry(Part.LineSegment(App.Vector(0, 5, 0), App.Vector(10, 5, 0)))
         self.doc.recompute()
         s = src.getParentGeoFeatureGroup().newObject("Sketcher::SketchObject", "S")
         s.AttachmentSupport = [(util.xy_plane(src.getParentGeoFeatureGroup()), "")]
         s.MapMode = "FlatFace"
         s.addExternal(src.Name, "Edge1")
-        s.addExternal(src.Name, "Edge2")
         self.doc.recompute()
-        want = sorted([("end", 0.0, 0.0, 0.0), ("end", 10.0, 0.0, 0.0), ("end", 0.0, 5.0, 0.0), ("end", 10.0, 5.0, 0.0)])
-        self.assertEqual(self._xy(sketch.key_points(s)), want, "FreeCAD's tool projects construction")
-        sketch.set_defining(s, [-3], True)
-        self.doc.recompute()
-        self.assertEqual(self._xy(sketch.key_points(s)), want)
+        self.assertEqual(sketch.key_points(s), [])
+        self.assertEqual(self._xy(sketch.key_points(s, projected=True)), [("end", 0.0, 0.0, 0.0), ("end", 10.0, 0.0, 0.0)])
 
     def test_point_geometry_is_an_end(self):
         s = _sketch(self.doc)

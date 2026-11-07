@@ -93,22 +93,41 @@ def _remove_wall(doc, body, f):
 
 
 def _inner_geometry(prof, t):
-    """Sketch geometry (sketch coordinates) of the profile's closed wires offset inward by `t`."""
+    """Sketch geometry (sketch coordinates) of the profile's area shrunk by `t`: its outline inward and its holes
+    outward (each wire offset on its own shrank a ring's hole too: the wall cut into the hole, a hole smaller than
+    the wall was refused, and a ring thinner than two walls left a cut that emptied the part)."""
     from incad.core import regions
     sh = prof.Shape.copy()
     sh.transformShape(prof.Placement.inverse().toMatrix())
+    closed = [w for w in sh.Wires if w.isClosed()]
+    too_thin = ValueError("The wall (%g mm) is as thick as the profile, or thicker: make it thinner" % t)
     geos = []
-    for w in sh.Wires:
-        if not w.isClosed():
-            continue
+    try:
+        area = Part.makeFace(closed, "Part::FaceMakerBullseye") if closed else None
+    except Exception as e:
+        raise ValueError("The profile can't take a %g mm wall: %s" % (t, e))
+    def offset(w, d):
         try:
-            off = offset2d.offset2d(w, -t, 2, False, False)  # (a 1 mm circle crashed OCC: by its radius)
+            off = offset2d.offset2d(w, d, 2, False, False)  # (a 1 mm circle crashed OCC: by its radius)
         except Exception as e:
-            if "null" in str(e).lower() or "larger than the circle" in str(e):  # (OCC's own words were shown)
-                raise ValueError("The wall (%g mm) is as thick as the profile, or thicker: make it thinner" % t)
+            if "null" in str(e).lower() or "larger than the circle" in str(e) or "no wires" in str(e):
+                # (OCC's own words were shown: "makeOffset2D: offset result has no wires" for a slot or a square)
+                raise too_thin
             raise ValueError("The profile can't take a %g mm wall: %s" % (t, e))
-        for e in off.Edges:
-            geos.append(regions._geometry(e))
+        return Part.makeFace(off.Wires, "Part::FaceMakerBullseye")
+
+    for face in (area.Faces if area is not None else []):
+        # the outline inward, each hole outward, the grown holes cut out of the shrunk outline (a face offset with
+        # holes in it came back as the shrunk hole alone)
+        inside = offset(face.OuterWire, -t)
+        for hole in (w for w in face.Wires if not w.isSame(face.OuterWire)):
+            inside = inside.cut(offset(hole, t))
+        inside = [f for f in inside.Faces if f.Area > 1e-6]
+        if not inside:  # a ring no thicker than two walls: nothing left between them
+            raise too_thin
+        for f in inside:
+            for w in f.Wires:
+                geos.extend(regions._geometry(e) for e in w.Edges)
     if not geos:
         raise ValueError("The wall is as thick as the profile: nothing would be left inside")
     return geos
@@ -217,10 +236,36 @@ def _wall_apply(doc, body, f, values):
     return pipe
 
 
+def _inside_out(doc, f, prof, path):
+    """A Sweep the kernel built inside out (a negative volume: the profile drawn 40 mm from where the path
+    starts was kept, with a warning about bends): refused in plain words."""
+    try:  # (the tool alone came out +89.5 while the Sweep's result was -89.5: both are looked at)
+        if not any(not sh.isNull() and sh.Solids and sh.Volume < 0 for sh in (f.Shape, f.AddSubShape)):
+            return
+    except Exception:
+        return
+    away = None
+    try:
+        import Part
+        p0 = _spine_ends(path)[0]
+        face = Part.makeFace(prof.Shape.Wires, "Part::FaceMakerBullseye")
+        away = face.distToShape(Part.Vertex(p0))[0]
+    except Exception:
+        pass
+    if away is not None and away > 1e-3:
+        raise ValueError("The profile is %.3g mm away from the path's start, so the sweep comes out inside out: draw "
+                         "the profile where the path starts (or start the path on the profile)" % away)
+    raise ValueError("The sweep comes out inside out (the path doubles back through the profile): start the path "
+                     "on the profile, square to it")
+
+
 def _sweep_apply(doc, f, values):
     prof, path = _one(doc, values.get("profile"), "profile"), _one(doc, values.get("path"), "path")
     if prof is path:
         raise ValueError("The path must be another sketch than the profile")
+    if path.TypeId == "Sketcher::SketchObject" and path.Shape.isNull():
+        path.recompute()  # (a sketch just made, not computed yet: the pieces check below was skipped, and FreeCAD
+                          # said only "Sweep: TopoDS::Wire")
     if path.TypeId == "Sketcher::SketchObject" and not path.Shape.isNull() and len(path.Shape.Wires) > 1:
         raise ValueError("The path %s is in %d separate pieces: a path is one chain of lines, arcs and splines "
                          "joined end to end (make the other pieces Construction, or join them)"
@@ -228,6 +273,8 @@ def _sweep_apply(doc, f, values):
     f.Profile = prof
     f.Spine = (path, [])  # the whole sketch: segments added or redrawn later are followed (probed)
     f.Transition = "Round corner" if "Round corner" in f.getEnumerationsOfProperty("Transition") else f.Transition
+    doc.recompute()
+    _inside_out(doc, f, prof, path)
     _wall_apply(doc, f.getParentGeoFeatureGroup(), f, values)
 
 
@@ -277,7 +324,7 @@ def _wall_drifted(f):
     try:
         want = _inner_geometry(prof, t.Value)
     except Exception:
-        return False
+        return True  # the profile can't take the wall any more (shrunk below it): said by the rebuild, not hidden
     try:  # by shape, not geometry by geometry: a spline comes back with other poles (it never matched: a rebuild
         want_edges = [g.toShape() for g in want]  # after every recompute, for ever - the finder)
         have = inner.Shape.copy()
@@ -293,16 +340,37 @@ def _wall_drifted(f):
 def follow_walls(doc):
     """After a recompute (incad.ui.shell): every hollow Sweep whose profile changed gets its wall again. Returns the
     labels rebuilt."""
-    from incad.core import safe
+    from incad.core import log, safe
     todo = [o for o in doc.Objects if o.TypeId == _TYPES["sweep"][0] and WALL_PROP in o.PropertiesList
             and _wall_drifted(o)]
     done = []
     for f in todo:
-        r = safe.run_safely("%s follows its profile" % f.Label,
+        label = f.Label
+        r = safe.run_safely("%s follows its profile" % label,
                             lambda s=f: SWEEP.update(doc, s, _sweep_read(doc, s)), doc)
         if r.ok:
-            done.append(f.Label)
+            done.append(label)
+        elif _undo_the_change(doc, f):
+            log.report("warning", "%s: the profile change was undone, the part is as it was" % label)
     return done
+
+
+def _undo_the_change(doc, f):
+    """A wall that can't follow its changed profile (shrunk below the wall): the old inner outline left in place cut
+    the whole tube away (volume 0). The last undo step is taken back when that gives the wall its own profile again
+    (the part exactly as before), else it is redone and nothing is changed."""
+    if not doc.UndoCount:
+        return False
+    doc.undo()
+    doc.recompute()
+    try:
+        back = _profile(f) is not None and not _wall_drifted(f)
+    except Exception:  # (the Sweep itself gone with the step: not the profile change)
+        back = False
+    if not back:
+        doc.redo()
+        doc.recompute()
+    return back
 
 
 # ----- Loft -----
@@ -329,7 +397,10 @@ def _loft_apply(doc, f, values):
 def _in_order(secs, closed):
     """Sections picked out of order (heights 0, 20, 10): the loft folded back through itself and was kept, valid and
     with a positive volume. Measured along each section's own normal, every step goes the same way: a zig-zag or a
-    curved loft (sections turning round an arc) is in order; one that comes back is not."""
+    curved loft (sections turning round an arc) is in order; one that comes back is not. A sketch's normal points
+    whichever way it was drawn (on a downward face, or flipped): each normal is first turned to agree with the one
+    before it, the first one towards the second section, so the direction is ONE for the whole loft (in-order
+    sections with one sketch facing down were refused, and a real fold-back with one passed)."""
     if closed or len(secs) < 3:
         return
     try:
@@ -337,13 +408,17 @@ def _in_order(secs, closed):
         normals = [s.getGlobalPlacement().Rotation.multVec(App.Vector(0, 0, 1)) for s in secs]
     except Exception:
         return
-    signs = []
+    along = None
     for k in range(len(secs) - 1):
-        ahead = (centres[k + 1] - centres[k]).dot(normals[k])
-        if abs(ahead) > 1e-6:
-            signs.append(ahead > 0)
-    for k in range(1, len(signs)):
-        if signs[k] != signs[0]:
+        n = normals[k]
+        if along is None:
+            first = (centres[k + 1] - centres[k]).dot(n)
+            if abs(first) <= 1e-6:
+                continue
+            along = n if first > 0 else -n
+            continue
+        along = n if n.dot(along) >= 0 else -n
+        if (centres[k + 1] - centres[k]).dot(along) < -1e-6:
             raise ValueError("The sections are out of order: %s comes back towards %s - pick them in order along "
                              "the loft" % (secs[k + 1].Label, secs[k].Label))
 

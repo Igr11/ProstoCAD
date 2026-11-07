@@ -282,7 +282,16 @@ def _drifted(doc, f):
     return out
 
 
-def follow(doc):
+def follow(before, values):
+    """Dialog values that follow a change: an Insert hole goes as deep as the insert (a little deeper), not Through
+    All: the insert's hole ran through the part (the user)."""
+    if values.get("hole_type") == "insert" and before.get("hole_type") != "insert" \
+            and values.get("depth_type") == "through_all":
+        return {"depth_type": "distance"}
+    return {}
+
+
+def follow_part(doc):
     """Bring every hole in step with the part after a recompute (incad.ui.shell): a To-a-face depth measured again,
     a Concentric hole's centres put where its round edges are. One undo step when anything changed."""
     from incad.core import safe

@@ -19,12 +19,19 @@ def _width_from(a, b, p):
     return abs(w.x * u.y - w.y * u.x)
 
 
-def overall(p1, p2, p3):
+START_RADIUS = 1.0  # mm: (kept for the tool's "widened" mark) a 2 mm start jumped, so the width follows the pointer
+LEAST_RADIUS = 0.05  # the narrowest a slot gets while its width is set: never nothing (it vanished on the line)
+
+
+def _at_least(r, length, least):
+    """The width's half, never under `least` (nor so wide the ends meet on a short slot)."""
+    return max(r, min(least, 0.4 * length))
+
+
+def overall(p1, p2, p3, least=LEAST_RADIUS):
     """Outer ends p1, p2; width from p3. Returns (center1, center2, radius)."""
-    r = _width_from(p1, p2, p3)
     d = p2 - p1
-    if r < 1e-6:
-        raise ValueError("Move away from the line to give the slot a width")
+    r = _at_least(_width_from(p1, p2, p3), d.Length, least)
     if d.Length <= 2 * r + 1e-6:
         raise ValueError("The slot is wider than it is long: pick the ends farther apart")
     u = App.Vector(d)
@@ -32,11 +39,15 @@ def overall(p1, p2, p3):
     return p1 + u * r, p2 - u * r, r
 
 
-def center_point(center, end, p3):
+def center_to_center(c1, c2, p3, least=LEAST_RADIUS):
+    """The arcs' centers c1, c2; width from p3."""
+    r = _at_least(_width_from(c1, c2, p3), 2.5 * (c2 - c1).Length, least)
+    return c1, c2, r
+
+
+def center_point(center, end, p3, least=LEAST_RADIUS):
     """Center of the slot, one end's arc center, width from p3."""
-    r = _width_from(center, end, p3)
-    if r < 1e-6:
-        raise ValueError("Move away from the line to give the slot a width")
+    r = _at_least(_width_from(center, end, p3), 2 * (end - center).Length, least)
     return center - (end - center), end, r
 
 

@@ -7,8 +7,9 @@ hole's rim, a face of the thread's chamfer) is let go: FreeCAD can't point it el
 lines where they are."""
 from incad.core import suppress
 
-KINDS = ("PartDesign::Pad", "PartDesign::Pocket", "PartDesign::Revolution", "PartDesign::Groove")
-JOINS = ("PartDesign::Pad", "PartDesign::Revolution")
+KINDS = ("PartDesign::Pad", "PartDesign::Pocket", "PartDesign::Revolution", "PartDesign::Groove",
+         "PartDesign::FeatureAdditivePython", "PartDesign::FeatureSubtractivePython")  # (the last two: ProstoCAD's own Extrude, Revolve)
+JOINS = ("PartDesign::Pad", "PartDesign::Revolution", "PartDesign::FeatureAdditivePython")
 MARGIN = 0.5  # mm around a thread's region: a feature that comes this close crosses it
 
 
@@ -161,7 +162,9 @@ def place_before(feature, thread):
             body.insertObject(o, target, False)
         for (o, prop), value in plan.items():
             setattr(o, prop, value)
+        from incad.features import revolve
         for o, gone in drop.items():
+            revolve.externals_going(o, gone)  # an axis on one of them stays where it is
             for n in sorted(gone, reverse=True):
                 o.delExternal(n)  # its constraints go with it; the lines stay where they are
         if was_tip and last is not None:

@@ -113,10 +113,8 @@ def _keeping_attachments(doc, change):
 
 
 def _profile(feature):
-    prof = getattr(feature, "Profile", None)
-    if isinstance(prof, (tuple, list)):
-        prof = prof[0] if prof else None
-    return prof
+    from incad.features.common import profile_of
+    return profile_of(feature)  # (through an Extrude's grown profile: the user's sketch)
 
 
 def owner_of(obj):

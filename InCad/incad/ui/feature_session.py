@@ -181,9 +181,16 @@ class FeatureSession(QtCore.QObject):
                     values.update({k: v for k, v in again.items() if k in values})
                 if getattr(self.kind, "NEEDS_PROFILE", True):
                     document.adopt(self.body, self.profile)  # a sketch left in another Solid comes along
-                    self.feature = self.kind.create(doc, self.body, self.profile, values)
-                    self._created_with = values.get("operation")
-                    self._created_values = dict(values)
+                    try:
+                        self.feature = self.kind.create(doc, self.body, self.profile, values)
+                    except Exception:
+                        if not self._picks_to_come(values):
+                            raise
+                        self.feature = None  # (Revolve with no axis yet) the dialog opens and waits for the
+                        self._drop_partial()  # click; the first preview after it makes the feature
+                    else:
+                        self._created_with = values.get("operation")
+                        self._created_values = dict(values)
             else:
                 values = self.kind.read(doc, self.feature)
             _recompute_sound(doc)
@@ -242,6 +249,12 @@ class FeatureSession(QtCore.QObject):
         self._sync_sketch_markers()  # an edited Sweep/Loft shows its sketches' points from the start
         self._sync_axis_line()  # an edited pattern / revolve on two points shows its axis from the start
         return True
+
+    def _picks_to_come(self, values):
+        """Pick fields the dialog will wait for (shown, empty, not optional) before it opens."""
+        from incad.features.common import shown
+        return [f.key for f in self.kind.FIELDS if f.kind in ("pick", "picks") and not f.optional
+                and shown(f, values) and not values.get(f.key)]
 
     def _shown(self, field):
         from incad.features.common import shown
@@ -1329,6 +1342,13 @@ class FeatureSession(QtCore.QObject):
             self.dialog.set_active_pick(revealed[0])
         elif hidden:
             self.dialog.set_active_pick(None)
+        hook = getattr(self.kind, "next_pick", None)  # a choice that makes a pick with a default the next click's
+        if hook is not None and self.dialog is not None:  # (a pattern's Solid: its axis, as in a professional CAD)
+            key = hook(self.dialog.values())
+            if key != getattr(self, "_next_pick_seen", None):
+                self._next_pick_seen = key
+                if key and self.dialog.active_pick() is None and self._shown(self.dialog.field_def(key)):
+                    self.dialog.set_active_pick(key)
 
     def _picked_sketches(self):
         """The sketches named in the dialog's `sketch` fields (Sweep's profile and path, Loft's sections)."""
@@ -1359,7 +1379,7 @@ class FeatureSession(QtCore.QObject):
         points = []
         for sk in picked:
             try:
-                points.extend(sketches.key_points(sk))
+                points.extend(sketches.key_points(sk, projected=True))  # (building commands pick on them)
             except Exception:
                 pass
         if not points:
@@ -1862,6 +1882,14 @@ class FeatureSession(QtCore.QObject):
             self.dialog.set_error("Nothing to create yet")
         if self.dialog is not None and self.dialog.error_text():
             return
+        built = getattr(self.kind, "before_ok", None)  # a preview drawn, not built (a pattern's outlines): built now
+        if built is not None and self.feature is not None and _feature_alive(self.feature):
+            try:
+                built(self.doc, self.feature)
+                self._recompute()
+            except Exception as e:
+                self.dialog.set_error(str(e))
+                return
         if self._recomputed is not None and self.dialog is not None:  # the full geometry check the previews left out
             found = safe.problems(self.doc, self._broken, self._recomputed)
             if found:

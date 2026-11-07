@@ -166,3 +166,66 @@ class ReviewTest(unittest.TestCase):
         rows = sc.rows(sk)
         self.assertEqual(len(rows), 600)
         self.assertLess(time.time() - t, 0.12)
+
+
+class ReferenceTest(unittest.TestCase):
+    def test_a_size_the_sketch_fixes_already_becomes_a_reference(self):
+        """A circle between two parallel lines (tangent to both) given a diameter: the sketch stopped solving
+        ("redundant constraints"); as a reference dimension it solves and shows the size (the user's air part)."""
+        from incad.core import sketch
+        doc = util.new_doc("Ref")
+        try:
+            body = document.make_part(doc)
+            src = body.newObject("Sketcher::SketchObject", "Src")  # the lines projected, as in the user's sketch
+            src.AttachmentSupport = [(util.xy_plane(body), "")]
+            src.MapMode = "FlatFace"
+            src.addGeometry(Part.LineSegment(App.Vector(-80, 0, 0), App.Vector(80, 0, 0)))
+            src.addGeometry(Part.LineSegment(App.Vector(-80, 153, 0), App.Vector(80, 153, 0)))
+            doc.recompute()
+            sk = body.newObject("Sketcher::SketchObject", "S")
+            sk.AttachmentSupport = [(util.xy_plane(body), "")]
+            sk.MapMode = "FlatFace"
+            sk.addExternal(src.Name, "Edge1")
+            sk.addExternal(src.Name, "Edge2")
+            doc.recompute()
+            sk.addGeometry(Part.Circle(App.Vector(0, 76.5, 0), App.Vector(0, 0, 1), 76.5))
+            sk.addConstraint(Sketcher.Constraint("Tangent", 0, -3))
+            sk.addConstraint(Sketcher.Constraint("Tangent", 0, -4))
+            i = sk.addConstraint(Sketcher.Constraint("Diameter", 0, 153.0))
+            self.assertTrue(sketch.over_defines(sk, i))
+            sketch.as_reference(sk, i)
+            self.assertEqual(sk.solve(), 0)
+            self.assertFalse(sk.Constraints[i].Driving)
+            self.assertAlmostEqual(sk.getDatum(i).Value, 153.0, places=6)
+            j = sk.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, 0, 3, 0.0))
+            self.assertFalse(sketch.over_defines(sk, j), "a size the sketch needs stays driving")
+        finally:
+            App.closeDocument(doc.Name)
+
+
+class TrimProjectedTest(unittest.TestCase):
+    def test_break_link_then_trim_a_projected_circle(self):
+        """A projected circle follows the part and is not trimmed; Break Link (as in the user's other CAD) makes it the
+        sketch's own geometry of its kind (construction), the tangent tied to it kept, and then it trims."""
+        from incad.core import sketch_trim
+        doc = util.new_doc("Trim")
+        try:
+            src = doc.addObject("Sketcher::SketchObject", "Src")
+            src.addGeometry(Part.Circle(App.Vector(0, 0, 0), App.Vector(0, 0, 1), 50))
+            doc.recompute()
+            sk = doc.addObject("Sketcher::SketchObject", "S")
+            sk.addExternal("Src", "Edge1")
+            doc.recompute()
+            sk.addGeometry(Part.LineSegment(App.Vector(-80, 20, 0), App.Vector(80, 20, 0)))
+            sk.addGeometry(Part.LineSegment(App.Vector(-80, 60, 0), App.Vector(80, 60, 0)))
+            sk.addConstraint(Sketcher.Constraint("Tangent", 1, -3))
+            new = sketch_trim.break_link(sk, [-3])[0]
+            sk.trim(new, App.Vector(0, 49, 0))
+            doc.recompute()
+            self.assertEqual(sk.Geometry[new].TypeId, "Part::GeomArcOfCircle")
+            self.assertTrue(sk.getConstruction(new))
+            self.assertEqual(len(sk.ExternalGeo), 2, "the projection went: only the H / V axes left")
+            self.assertIn(("Tangent", new, 1), [(c.Type, c.First, c.Second) for c in sk.Constraints])
+            self.assertEqual(sk.solve(), 0)
+        finally:
+            App.closeDocument(doc.Name)

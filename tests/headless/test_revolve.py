@@ -30,7 +30,7 @@ class RevolveTest(unittest.TestCase):
         self.assertEqual((v["operation"], v["axis_mode"], v["extent"]), ("join", "V_Axis", "full"))
         f = revolve.create(self.doc, self.body, self.sk, v)
         self.doc.recompute()
-        self.assertEqual(f.TypeId, "PartDesign::Revolution")
+        self.assertEqual(f.TypeId, revolve.JOIN)
         self.assertAlmostEqual(f.Shape.Volume, math.pi * (6 ** 2 - 2 ** 2) * 4, places=2)
         self.assertIs(kind_for(f), revolve)
 
@@ -53,7 +53,7 @@ class RevolveTest(unittest.TestCase):
                            dict(revolve.defaults(self.doc, self.body, self.sk), operation="new_solid"))
         self.doc.recompute()
         owner = f.getParentGeoFeatureGroup()
-        self.assertEqual(f.TypeId, "PartDesign::Revolution")
+        self.assertEqual(f.TypeId, revolve.JOIN)
         self.assertIsNot(owner, self.body)
         self.assertIs(self.sk.getParentGeoFeatureGroup(), owner)
         self.assertIs(document.primary_body(self.doc), self.body)

@@ -58,7 +58,7 @@ def test_1_extrude_picks_the_only_profile_and_previews():
     harness.pump(800)
     assert dialog() is not None and dialog().isVisible()
     f = s().feature_session.feature
-    assert f is not None and f.TypeId == "PartDesign::Pad" and abs(f.Shape.Volume - 2000) < 1e-6
+    assert f is not None and f.TypeId == "PartDesign::FeatureAdditivePython" and abs(f.Shape.Volume - 2000) < 1e-6
     assert safe.busy() == "Extrude"
 
 
@@ -92,7 +92,7 @@ def test_4_cancel_restores_after_previews():
     QTest.mouseClick(dialog().cancel_button, QtCore.Qt.LeftButton)
     harness.pump(600)
     pad = doc().getObject(ST["pad"])
-    assert pad is not None and pad.TypeId == "PartDesign::Pad" and abs(pad.Length.Value - 25) < 1e-6
+    assert pad is not None and pad.TypeId == "PartDesign::FeatureAdditivePython" and abs(pad.Length.Value - 25) < 1e-6
     assert list(doc().UndoNames) == names, (doc().UndoNames, names)
 
 
@@ -125,7 +125,7 @@ def test_6_cut_through_all_on_top():
     QTest.mouseClick(dialog().ok_button, QtCore.Qt.LeftButton)
     harness.pump(600)
     tip = body().Tip
-    assert tip.TypeId == "PartDesign::Pocket", tip.TypeId
+    assert tip.TypeId == "PartDesign::FeatureSubtractivePython", tip.TypeId
     assert body().Shape.Volume < 20 * 10 * 25 - 1
 
 
@@ -222,7 +222,7 @@ def test_12_user_undo_keeps_features_following_their_parameters():
     commands.REGISTRY.run("edit.undo")  # brings the Pad back (FreeCAD drops its formula link; InCad repairs it)
     harness.pump(800)
     pad = doc().getObject(ST["undo_pad"])
-    assert pad is not None and pad.TypeId == "PartDesign::Pad", (pad, before, list(doc().UndoNames)[:4])
+    assert pad is not None and pad.TypeId == "PartDesign::FeatureAdditivePython", (pad, before, list(doc().UndoNames)[:4])
     name = model.bound_parameter(pad, "Length")
     s().browser.parameterSet.emit(name, "13 mm")
     harness.pump(600)

@@ -253,12 +253,23 @@ def _same_geometry(profile, geos):
         return False
 
 
+def merged(faces):
+    """Areas side by side become one (their shared line goes: FreeCAD can't make a face from an outline that runs
+    along a line twice); separate ones stay separate."""
+    if len(faces) < 2:
+        return list(faces)
+    try:
+        return list(faces[0].fuse(list(faces[1:])).removeSplitter().Faces)
+    except Exception:
+        return list(faces)
+
+
 def fill(profile, faces, source=None):
     """The profile's geometry: the outlines of these faces, then the source sketch's construction lines (as
     construction: a Revolve's axis is one, read on the profile itself and following the sketch - a helper through
     fixed points stayed put, the finder); left alone when it already is (see _attach_like)."""
     geos = []
-    for face in (faces if isinstance(faces, (list, tuple)) else [faces]):
+    for face in merged(faces if isinstance(faces, (list, tuple)) else [faces]):
         geos += outline(face)
     n = len(geos)
     if source is not None:

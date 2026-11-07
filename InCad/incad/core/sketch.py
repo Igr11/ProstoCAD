@@ -47,11 +47,12 @@ def is_open_contour(sk):
         return False
 
 
-def key_points(sk):
+def key_points(sk, projected=False):
     """[(kind, global Vector)] the view marks on a sketch: a spline's poles ('pole') and the points it passes
     through ('end'), a line's or arc's ends and
-    a point ('end'), a circle's or ellipse's centre ('centre'). Construction geometry and every projected edge count
-    like normal geometry (the user's law: equal rights; only a solid's profile leaves construction out); points within
+    a point ('end'), a circle's or ellipse's centre ('centre'). Construction geometry counts like normal geometry (the
+    user's law: equal rights); projected edges only with `projected` (a feature dialog picks on them; the plain view
+    leaves the part's own edges unmarked: the user, "get rid of those dots"); points within
     1e-6 of an earlier one are merged (the first kind wins)."""
     pl = sk.getGlobalPlacement()
     out = []
@@ -61,10 +62,14 @@ def key_points(sk):
         if not any((g - q).Length < 1e-6 for _, q in out):
             out.append((kind, g))
 
-    normal = list(sk.Geometry) + list(getattr(sk, "ExternalGeo", []) or [])[2:]  # not the H / V axes
-    for geo in normal:
+    own = list(sk.Geometry)
+    shown = own + (list(getattr(sk, "ExternalGeo", []) or [])[2:] if projected else [])  # not the H / V axes
+    for i, geo in enumerate(shown):
         tid = geo.TypeId
-        if tid == "Part::GeomBSplineCurve":
+        if tid == "Part::GeomBSplineCurve" and i >= len(own):  # a projected spline (a STEP's arc written as one):
+            add("end", geo.StartPoint)                         # its ends; its poles are nobody's points (the user's
+            add("end", geo.EndPoint)                           # air2: a ring of dots round a projected disc)
+        elif tid == "Part::GeomBSplineCurve":
             for p in geo.getPoles():
                 add("pole", p)
             for k in geo.getKnots():  # the points the line passes through (a spline drawn through points)
@@ -126,7 +131,7 @@ def copy_edges(sk, edges):
     return ids
 
 
-def make_sketch(body, support, sub=""):
+def make_sketch(body, support, sub="", view_dir=None, view_up=None):
     """A sketch in `body`, attached to `support` (+ face name), placed after End of Part."""
     if not valid_support(support, sub):
         raise ValueError("Pick a plane or a flat face to sketch on")
@@ -135,7 +140,33 @@ def make_sketch(body, support, sub=""):
     sk.MapMode = "FlatFace"
     sk.Label = _next_label(body.Document, "Sketch")
     body.Document.recompute([sk])  # it alone: nothing uses it yet (a full recompute retried every broken feature)
+    if _turn_to_view(sk, view_dir, view_up):
+        body.Document.recompute([sk])
     return sk
+
+
+def _turn_to_view(sk, view_dir, view_up):
+    """Sketcher turns the view so the sketch's X points right and Y up; on a part's face those come from the face
+    and could stand at 90 or 180 degrees to the screen (the user: the face turned over, the long way round). The
+    new sketch's axes are turned in its plane, in quarter turns, to the screen's right and up nearest them: the view
+    then turns the shortest way. True when they were turned."""
+    import FreeCAD as App
+    if view_dir is None or view_up is None:
+        return False
+    up = App.Vector(view_up)
+    look = App.Vector(view_dir)
+    if up.Length < 1e-12 or look.Length < 1e-12:
+        return False
+    right = look.cross(up)  # the screen's right in the world
+    rot = sk.getGlobalPlacement().Rotation
+    x, y = rot.multVec(App.Vector(1, 0, 0)), rot.multVec(App.Vector(0, 1, 0))
+    best = max(range(4), key=lambda k: (x * [1, 0, -1, 0][k] + y * [0, 1, 0, -1][k]).dot(right)
+               + (y * [1, 0, -1, 0][k] - x * [0, 1, 0, -1][k]).dot(up))
+    if best == 0:
+        return False
+    sk.AttachmentOffset = App.Placement(App.Vector(), App.Rotation(App.Vector(0, 0, 1), 90 * best))
+    return True
+
 
 
 def status(sk):
@@ -293,6 +324,26 @@ def drop_redundant(sk):
 
 IMPLIED = ("Horizontal", "Vertical", "Parallel", "Perpendicular", "Equal")  # ties a newer one may make redundant
 TIES = IMPLIED + ("Coincident", "PointOnObject", "Tangent", "Symmetric")  # what the constraint tools add
+
+
+def over_defines(sk, index):
+    """True when dimension `index`, driving, repeats or fights what the sketch fixes already (a circle tangent to two
+    parallel lines given a diameter, the user's: "the size shouldn't throw an error, but ask or set it as a
+    reference") and the sketch solves with it as a reference dimension."""
+    c = sk.Constraints[index]
+    if c.Type not in DIMENSIONAL or not c.Driving or sk.solve() not in (-2, -3):
+        return False
+    sk.setDriving(index, False)
+    clean = sk.solve() == 0
+    sk.setDriving(index, True)
+    sk.solve()
+    return clean
+
+
+def as_reference(sk, index):
+    """Dimension `index` made a reference dimension (it shows the size, drives nothing)."""
+    sk.setDriving(index, False)
+    sk.solve()
 
 
 def redundant(sk):

@@ -101,6 +101,19 @@ class SymmetricTest(unittest.TestCase):
         self.assertAlmostEqual(a.x, -b.x, places=6)
         self.assertAlmostEqual(a.y, b.y, places=6)
 
+    def test_a_point_on_the_mirror_line_takes_the_other_onto_it(self):
+        """A point on the mirror line is its own mirror image: Symmetric was refused ("other constraints hold them",
+        the finder); the other point goes onto it."""
+        p = self.add(Part.Point(V(0, 30, 0)))
+        self.sk.addConstraint(Sketcher.Constraint("PointOnObject", p, 1, -2))
+        self.sk.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, p, 1, 30))
+        q = self.add(Part.Point(V(5, 6, 0)))
+        r = self.apply(("point", p, 1), ("point", q, 1), ("edge", sym.V_AXIS))
+        self.assertTrue(r.ok, r.error)
+        b = self.sk.getPoint(q, 1)
+        self.assertAlmostEqual(b.x, 0, places=6)
+        self.assertAlmostEqual(b.y, 30, places=6)
+
     def test_two_lines_ends_paired_by_their_mirror(self):
         axis = self.add(Part.LineSegment(V(0, -10, 0), V(0, 10, 0)), construction=True)
         left = self.add(Part.LineSegment(V(-8, -3, 0), V(-4, 5, 0)))

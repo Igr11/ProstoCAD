@@ -1,4 +1,4 @@
-"""A click on a sketch row in the model tree shows that sketch in the 3D view (with its points) while it is
+"""A click on a sketch row in the model tree shows that sketch in the 3D view while it is
 selected — a consumed sketch too; the next row, Esc or a cleared selection hides it again. Nothing is saved."""
 import os
 import sys
@@ -46,7 +46,7 @@ def test_1_click_shows_the_consumed_sketch_and_the_next_row_hides_it():
     assert sh.browser.select_row("Sketch")
     harness.pump(500)
     assert _sk().Visibility, "shown while selected"
-    assert _count() == 4, _count()
+    assert _count() == 0, _count()  # no points in the plain view
     assert [o.Name for o in Gui.Selection.getSelection()] == ["Sketch"]
     assert sh.browser.select_row("Pad")
     harness.pump(500)
@@ -94,14 +94,14 @@ def test_4_an_unused_shown_sketch_stays_shown_after_the_peek():
     App.ActiveDocument.recompute()
     sh.schedule_refresh()
     harness.pump(600)
-    assert path.Visibility and _count() == 2, (path.Visibility, _count())
+    assert path.Visibility and _count() == 0, (path.Visibility, _count())
     sh.browser.select_row("Path")
     harness.pump(500)
-    assert path.Visibility and _count() == 2
+    assert path.Visibility and _count() == 0
     sh.browser.select_row("Pad")
     harness.pump(500)
     assert path.Visibility, "an open contour keeps its own rule"
-    assert _count() == 2
+    assert _count() == 0
 
 
 def test_5_a_sweeps_path_and_profile_show_when_their_rows_are_clicked():

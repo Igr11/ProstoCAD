@@ -43,8 +43,8 @@ def loose_piece(feature):
     """Where a feature's profile sketch has a piece that is no part of a closed outline (the user: Revolve failed
     with "Wire is not closed" — one 0.2 mm line of a half-section left as normal geometry), said in the sketch's
     own coordinates; '' when there is none."""
-    prof = getattr(feature, "Profile", None)
-    sk = prof[0] if isinstance(prof, (tuple, list)) and prof else prof
+    from incad.features.common import profile_of
+    sk = profile_of(feature)  # (through an Extrude's grown profile)
     if sk is None or getattr(sk, "TypeId", "") != "Sketcher::SketchObject":
         return ""
     try:
@@ -117,15 +117,16 @@ def _broken(obj, check_shape, deep=True, checked=None):
             if obj.TypeId in thread_order.KINDS and _has_modeled_thread(getattr(obj, "BaseFeature", None)):
                 return ("%s crosses a modeled (helical) thread, which FreeCAD's kernel can't cut or join through: "
                         "put it before the thread in the tree" % obj.Label)
-            if obj.TypeId in ("PartDesign::Groove", "PartDesign::Revolution"):
+            if obj.TypeId in ("PartDesign::Groove", "PartDesign::Revolution") or \
+                    "InCadRevolve" in obj.PropertiesList:  # (ProstoCAD's own Revolve)
                 return ("%s: the revolve couldn't form a valid shape — the axis must lie IN the profile's plane "
                         "and not cross or touch the profile (draw the profile on a plane through the axis)" % obj.Label)
-            return "%s produced invalid geometry" % obj.Label
-        if obj.TypeId in _TRANSFORMED and (shape is None or shape.isNull() or not shape.Solids):
+            return _why_invalid(obj) or "%s produced invalid geometry" % obj.Label
+        if _is_pattern(obj) and (shape is None or shape.isNull() or not shape.Solids):
             return ("%s: the pattern produced nothing — the picked feature can't be repeated here (a feature that "
                     "changes nothing, or a cut that can't be moved). Pick another feature, or put the pattern "
                     "right after it" % obj.Label)
-        if obj.TypeId in _TRANSFORMED and _changes_nothing(obj, shape):
+        if _is_pattern(obj) and not _one_copy(obj) and not _drawn_only(obj) and _changes_nothing(obj, shape):
             return ("%s: the pattern changes nothing — its copies fall where the part has no material, or the "
                     "picked feature (a thread, for example) can't be repeated. Pick another feature" % obj.Label)
         # a volume only where there is next to nothing: the volume of a part with a modeled thread took 0.2 s,
@@ -138,7 +139,7 @@ def _broken(obj, check_shape, deep=True, checked=None):
                     return ("%s: the cut failed in the kernel and left nothing — a modeled (helical) thread earlier "
                             "in the part is the usual cause. Put this cut BEFORE the thread, or make the thread "
                             "cosmetic" % obj.Label)
-                return "%s cuts away the whole part: choose another axis, extent or profile" % obj.Label
+                return _whole_part_cut(obj)
         if obj.TypeId == "PartDesign::Boolean" and shape is not None and (shape.isNull() or not shape.Solids):
             base = getattr(obj, "BaseFeature", None)  # an empty result was kept silently: the part simply vanished
             if base is not None and not base.Shape.isNull() and bool(base.Shape.Solids):
@@ -147,13 +148,84 @@ def _broken(obj, check_shape, deep=True, checked=None):
                             % obj.Label)
                 return "%s cuts away the whole part: the tool covers all of it" % obj.Label
         if obj.TypeId == "PartDesign::Boolean" and deep and shape is not None and not shape.isNull() \
-                and _touching(shape.Solids):
+                and _touching(shape.Solids) and _faulty(shape):
             return ("%s: the solids only touch along a line or at a point, which makes no sound solid (later "
                     "features fail on it): move the tool a little into the part, or clear of it" % obj.Label)
     return ""
 
 
-_CUTS = ("PartDesign::Pocket", "PartDesign::Groove", "PartDesign::Hole")
+def _whole_part_cut(obj):
+    """A cut that leaves nothing, in the words of what was cut: a hole has no axis, extent or profile to choose
+    (a 40 mm hole in a 20 mm block), and a hollow Sweep's wall is no cut the user made (its profile shrank below
+    the wall)."""
+    owner = getattr(obj, "InCadHelperOf", "") if obj.TypeId == "PartDesign::SubtractivePipe" else ""
+    sweep = obj.Document.getObject(owner) if owner else None
+    if sweep is not None:
+        wall = getattr(sweep, "InCadWall", None)
+        size = ("%g mm " % wall.Value) if wall is not None else ""
+        return ("%s: the %swall is as thick as the profile now, or thicker, so nothing is left of the tube: make the "
+                "wall thinner or the profile bigger" % (sweep.Label, size))
+    if obj.TypeId == "PartDesign::Hole":
+        return ("%s is wider than the part there, so nothing would be left: make the diameter smaller"
+                % obj.Label)
+    return "%s cuts away the whole part: choose another axis, extent or profile" % obj.Label
+
+
+def _faulty(shape):
+    """True when the full check finds faults in `shape` (faces that cross themselves, edges off their faces)."""
+    try:
+        shape.check(True)
+        return False
+    except Exception:
+        return True
+
+
+def _faulty_base(obj):
+    """Plain words when the shape `obj` builds on was faulty already (an imported solid whose faces cross
+    themselves: every next feature fails on it, the user's air2), naming where it went wrong; '' else."""
+    base = getattr(obj, "BaseFeature", None)
+    bshape = getattr(base, "Shape", None)
+    if bshape is None or bshape.isNull() or not bshape.Solids or len(bshape.Faces) > MANY_FACES:
+        return ""
+    if _faulty(bshape):
+        first = base
+        while getattr(first, "BaseFeature", None) is not None and _faulty(first.BaseFeature.Shape):
+            first = first.BaseFeature
+        imported = getattr(first, "BaseFeature", None) if first.TypeId == "PartDesign::FeatureBase" else None
+        where = ("the solid imported as %s" % imported.Label) if imported is not None else first.Label
+        return ("%s: the shape it builds on is faulty already (%s has faces that cross themselves or edges off "
+                "their faces), so every feature after it fails. Remake that shape, or start the part from a "
+                "sound one" % (obj.Label, where))
+    return ""
+
+
+def _why_invalid(obj):
+    """Plain words for a feature whose result came out invalid: a faulty shape before it (_faulty_base), or a join
+    that touches the part only along a line (a disc resting on a block's top: no kernel makes one solid of that);
+    '' else."""
+    why = _faulty_base(obj)
+    if why:
+        return why
+    if obj.TypeId == "PartDesign::Fillet":
+        return ("%s: the radius is too big for these edges (the rounds meet each other or run past a face next to "
+                "them, which is narrower than the radius allows): make the radius smaller" % obj.Label)
+    if obj.TypeId == "PartDesign::Chamfer":
+        return ("%s: the chamfer is too big for these edges (it runs past a face next to them): make it smaller"
+                % obj.Label)
+    if obj.TypeId.endswith("Helix"):
+        return ("%s: its turns touch or overlap (or the profile crosses the axis), so no solid can be made: make "
+                "the pitch larger than the profile is high, or move the profile off the axis" % obj.Label)
+    if obj.TypeId in _JOINS:
+        return ("%s touches the part only along a line or at a point somewhere (a round face resting on a flat "
+                "one, an edge on a face): no solid can be made of that. Make it reach a little into the part, "
+                "or keep it clear" % obj.Label)
+    return ""
+
+
+_JOINS = ("PartDesign::Pad", "PartDesign::Revolution", "PartDesign::AdditivePipe", "PartDesign::AdditiveLoft",
+          "PartDesign::FeatureAdditivePython")  # (ProstoCAD's own Extrude and Revolve: a Join, a Cut)
+_OWN_CUT = "PartDesign::FeatureSubtractivePython"
+_CUTS = ("PartDesign::Pocket", "PartDesign::Groove", "PartDesign::Hole", _OWN_CUT)  # (a hole off the part cut nothing too)
 _SWEPT = ("PartDesign::AdditivePipe", "PartDesign::SubtractivePipe", "PartDesign::AdditiveLoft",
           "PartDesign::SubtractiveLoft", "PartDesign::AdditiveHelix", "PartDesign::SubtractiveHelix")
 _EDGES = ("PartDesign::Fillet", "PartDesign::Chamfer")
@@ -165,9 +237,9 @@ def unsound(obj):
     wall along a line (a circle tangent to the side) leaves a wall of no thickness there, and later features (a
     fillet, a shell, another cut) fail on it; '' when sound, or not looked at (big, or a modeled thread: the full
     check finds false faults on helical faces)."""
-    if obj is not None and obj.TypeId in _TRANSFORMED:
-        return _loose_copies(obj)
-    if obj is None or (obj.TypeId not in _CUTS + ("PartDesign::Boolean",) + _SWEPT + _EDGES
+    if obj is not None and _is_pattern(obj):
+        return _loose_copies(obj) or _faulty_copies(obj)
+    if obj is None or (obj.TypeId not in _CUTS + ("PartDesign::Boolean", "PartDesign::Pad", _JOINS[-1]) + _SWEPT + _EDGES
                        and "InCadEmboss" not in getattr(obj, "PropertiesList", ())):  # (an Emboss wrapped on a round
         return ""                                                                     # face had faulty edges)
     shape = getattr(obj, "Shape", None)
@@ -179,6 +251,8 @@ def unsound(obj):
         shape.check(True)
         return ""
     except Exception:
+        if _faulty_base(obj):  # the fault was there before it (a STEP's solid): no worse than its part, not this
+            return ""          # feature's to answer for (the message stays for a feature that fails outright)
         if obj.TypeId in _EDGES:
             return ("%s leaves a faulty spot (tiny edges or faces that cross where it meets another face): a later "
                     "feature may fail there. Try a slightly different size" % obj.Label)
@@ -189,6 +263,10 @@ def unsound(obj):
             return ("%s runs through itself somewhere (a path that bends tighter than the profile is wide, or a "
                     "closed loft that comes back across itself): a later feature may fail on it. Make the profile "
                     "smaller, the bends wider, or the loft open" % obj.Label)
+        if obj.TypeId in ("PartDesign::Pad", _JOINS[-1]):
+            return _why_invalid(obj) or ("%s touches the part only along a line or at a point somewhere: a later "
+                                         "feature may fail there. Make it reach a little into the part, or keep it "
+                                         "clear" % obj.Label)
         return ("%s leaves a wall of no thickness somewhere (the cut touches a side along a line, or at a point): "
                 "it can't be printed, and a later fillet or shell may fail there. Move the profile a little into "
                 "the side, or clear of it" % obj.Label)
@@ -255,6 +333,49 @@ def _gap(a, b):
     return sum((x - y) ** 2 for x, y in zip(a[4], b[4])) ** 0.5
 
 
+def _side(face):
+    """What tells a face next to an edge again, wherever it moved: its surface type and its facing (a plane's
+    outward normal, sign kept; a round face's axis, either way)."""
+    import FreeCAD as App
+    srf = face.Surface
+    name = type(srf).__name__
+    try:
+        if name == "Plane":
+            u, v = srf.parameter(face.CenterOfMass)
+            d, signed = face.normalAt(u, v), True
+        elif hasattr(srf, "Axis"):
+            d, signed = App.Vector(srf.Axis), False
+        else:
+            d, signed = None, False
+    except Exception:
+        d, signed = None, False
+    if d is not None and d.Length > 1e-12:
+        d = d * (1.0 / d.Length)
+    return ("Face", name, d, signed, ())
+
+
+def _sides(shape, edge):
+    """The faces next to `edge` in `shape`, each as _side; None when they can't be told."""
+    try:
+        import Part
+        return sorted((_side(f) for f in shape.ancestorsOfType(edge, Part.Face)), key=lambda s: s[1])
+    except Exception:
+        return None
+
+
+def _same_sides(a, b):
+    """The same faces next to the edge (by kind and facing), each matched once."""
+    if a is None or b is None or len(a) != len(b):
+        return False
+    left = list(b)
+    for side in a:
+        hit = next((x for x in left if _alike(side, x)), None)
+        if hit is None:
+            return False
+        left.remove(hit)
+    return True
+
+
 def link_snapshot(doc):
     """{feature: (its picks, {element: signature} of every edge and face of the shape they are on)}, taken before
     a change (see repair_links)."""
@@ -275,22 +396,28 @@ def link_snapshot(doc):
                 if any(s.startswith(kind) for s in link[1]):
                     for i, el in enumerate(pool):
                         sigs["%s%d" % (kind, i + 1)] = _sig(el, box)
-            out[f.Name] = (list(link[1]), sigs)
+            sides = {}  # the picked edges' own faces (the edge on the same two faces is the same edge)
+            for s in link[1]:
+                if s.startswith("Edge"):
+                    sides[s] = _sides(shape, shape.getElement(s))
+            out[f.Name] = (list(link[1]), sigs, sides)
         except Exception:
             pass
     return out
 
 
 NEAR = 0.02  # how close (as a share of the part's size) a found element must sit to where the lost one was
+FAR = 0.25   # how far it may have moved when it also lies between the same two kinds of face (a pocket made wider)
 
 
 def repair_links(doc, snap):
     """Fillets / chamfers / shells / drafts whose edges or faces FreeCAD lost in a size change ('?Edge1': a Pad
     made 30 high, or a sketch made wider, lost the vertical edges, and the change was refused - the commonest edit
     there is) get them back: the one element of the same kind, type and direction that sits where the lost one
-    sat in the part's box and is no other element's continuation. Nothing is guessed: when none or two fit, the
-    link stays lost and the feature says so (a fillet moved silently to another edge was worse). Returns the
-    features repaired."""
+    sat in the part's box and is no other element's continuation. An edge that lies between the same two kinds of
+    face as before (the rim of a pocket made 0.4 mm wider: the top and the same wall) may have moved further, as
+    long as it is clearly the nearest such edge. Nothing is guessed: when none or two fit, the link stays lost and
+    the feature says so (a fillet moved silently to another edge was worse). Returns the features repaired."""
     fixed = []
     for f in doc.Objects:
         if f.Name not in snap:
@@ -299,7 +426,8 @@ def repair_links(doc, snap):
         if not isinstance(link, tuple) or len(link) != 2 or link[0] is None or \
                 not any(isinstance(s, str) and s.startswith("?") for s in link[1]):
             continue
-        picks, old = snap[f.Name]
+        picks, old = snap[f.Name][:2]
+        old_sides = snap[f.Name][2] if len(snap[f.Name]) > 2 else {}
         obj, subs = link[0], list(link[1])
         if len(subs) != len(picks):
             continue
@@ -319,17 +447,21 @@ def repair_links(doc, snap):
             if lost is None:
                 ok = False
                 break
+            sides = old_sides.get(was)
+            reach = FAR if sides else NEAR
             near = []
             for name, sig in new_sigs.items():
-                if name in taken or not _alike(sig, lost) or _gap(sig, lost) > NEAR:
+                if name in taken or not _alike(sig, lost) or _gap(sig, lost) > reach:
                     continue
                 # no other element of before sits closer to it: it is the lost one moved, not a survivor
                 if any(o_name != was and _alike(o_sig, sig) and _gap(o_sig, sig) < _gap(lost, sig)
                        for o_name, o_sig in old.items()):
                     continue
+                if _gap(sig, lost) > NEAR and not _same_sides(sides, _sides(shape, shape.getElement(name))):
+                    continue  # moved further than a size change moves an edge: only on the same two faces
                 near.append((_gap(sig, lost), name))
             near.sort()
-            if not near or (len(near) > 1 and near[1][0] - near[0][0] < NEAR / 2):
+            if not near or (len(near) > 1 and near[1][0] - near[0][0] < max(NEAR / 2, near[0][0])):
                 ok = False  # none, or two alike: not guessed
                 break
             taken.add(near[0][1])
@@ -377,8 +509,8 @@ def _loose_copies(obj):
         extra = len(shape.Solids) - (len(base.Solids) if base is not None and not base.isNull() else 1)
     except Exception:
         return ""
-    if extra <= 0:
-        return ""
+    if extra <= 0 or getattr(obj, "Result", "") in ("new", "each") and "InCadPattern" in obj.PropertiesList:
+        return ""  # copies made a Solid of their own: lying apart is what was asked for
     originals = [o for o in getattr(obj, "Originals", None) or [] if o is not None]
     if originals and all(o.TypeId in _SUBTRACTIVE for o in originals):  # cuts: they split the part, nothing lands off
         return ("%s cuts the part into %d separate pieces in one Solid (a Shell or Fillet then fails on it): split it "
@@ -387,9 +519,23 @@ def _loose_copies(obj):
             "fails on it): fewer copies, a smaller spacing, or exclude them" % (obj.Label, extra))
 
 
+def _faulty_copies(obj):
+    """A pattern or mirror whose result the kernel calls valid but whose full check fails on a sound base: copies
+    that touch each other or the part only along a line (discs of a pattern spaced their diameter apart) - said."""
+    shape = getattr(obj, "Shape", None)
+    if shape is None or shape.isNull() or not shape.Solids or len(shape.Faces) > MANY_FACES or \
+            _has_modeled_thread(getattr(obj, "BaseFeature", None)) or not _faulty(shape) or _faulty_base(obj):
+        return ""
+    return ("%s: its copies touch each other or the part only along a line or at a point (copies spaced exactly "
+            "their width apart, round faces resting on each other): a later Shell or Fillet may fail there. Make "
+            "the spacing a little smaller, so they overlap, or larger, so they stand apart" % obj.Label)
+
+
 def _touching(solids, most=12):
-    """Two of the separate solids touching (a line or a point in common): the kernel calls the result valid, yet its
-    full check fails. Solids apart (a part cut in two) are fine. More than `most` solids: not looked at (slow)."""
+    """Two of the separate solids touching (a line or a point in common). Only a sign: a join of a disc on a block's
+    side gives pieces with an edge each there and the full check fails, while a cut by a tool tangent to two walls
+    (a 20 mm round through a 20 mm block) gives pieces sharing that edge, which is sound — the caller asks the full
+    check too. Solids apart (a part cut in two) are fine. More than `most` solids: not looked at (slow)."""
     if not 1 < len(solids) <= most:
         return False
     for i, a in enumerate(solids):
@@ -420,6 +566,26 @@ def _has_modeled_thread(feature):
     return False
 
 
+def _drawn_only(obj):
+    """A pattern whose dialog is open: its copies are drawn as outlines, built on OK (and checked then)."""
+    try:
+        from incad.features import own_pattern
+        return obj.Name in own_pattern.GHOST
+    except Exception:
+        return False
+
+
+def _one_copy(pattern):
+    """True for a pattern of Count 1 (in every direction): it is the original alone, as meant (a count parameter set
+    to 1 switches the copies off), not a pattern that "changes nothing"."""
+    counts = pattern
+    props = [p for p in ("Occurrences", "Occurrences2") if p in getattr(counts, "PropertiesList", ())]
+    try:
+        return bool(props) and all(int(getattr(counts, p)) <= 1 for p in props)
+    except Exception:
+        return False
+
+
 def _changes_nothing(pattern, shape):
     """True if the pattern's result has the same volume as what it was built on (it added or removed nothing)."""
     try:
@@ -439,7 +605,12 @@ def _changes_nothing(pattern, shape):
 
 _TRANSFORMED = ("PartDesign::LinearPattern", "PartDesign::PolarPattern", "PartDesign::Mirrored",
                 "PartDesign::MultiTransform")
-_SUBTRACTIVE = ("PartDesign::Groove", "PartDesign::Pocket", "PartDesign::SubtractiveHelix",
+
+
+def _is_pattern(obj):
+    """FreeCAD's patterns and mirrors, and InCad's own Pattern (incad.features.own_pattern)."""
+    return obj.TypeId in _TRANSFORMED or "InCadPattern" in getattr(obj, "PropertiesList", ())
+_SUBTRACTIVE = ("PartDesign::Groove", "PartDesign::Pocket", _OWN_CUT, "PartDesign::SubtractiveHelix",
                 "PartDesign::SubtractivePipe", "PartDesign::SubtractiveLoft", "PartDesign::Hole")
 
 
@@ -606,7 +777,18 @@ def broken_now(doc, broken_before, touched, deep=True):
     checked = set()
     found = [(o.Name, _broken(o, o.Name in touched, deep, checked)) for o in doc.Objects
              if o.Name not in broken_before and not beyond_end(o)]
-    return [(n, why) for n, why in found if why]
+    found = [(n, why) for n, why in found if why]
+    # a Solid's shape is its last feature's: when that feature is named with its reason, the Solid's own bare
+    # "Solid1 produced invalid geometry" is the same fault said twice (and read as a second culprit)
+    named = {n for n, _why in found}
+    inside = set()
+    for n in named:
+        o = doc.getObject(n)
+        group = o.getParentGeoFeatureGroup() if o is not None and hasattr(o, "getParentGeoFeatureGroup") else None
+        if group is not None and group.Name != n:
+            inside.add(group.Name)
+    return [(n, why) for n, why in found
+            if not (n in inside and why == "%s produced invalid geometry" % doc.getObject(n).Label)]
 
 
 def _relink(doc):

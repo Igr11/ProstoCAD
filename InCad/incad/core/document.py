@@ -112,6 +112,7 @@ def settle_support(sketch, body):
     other = obj if obj.TypeId == "PartDesign::Body" else obj.getParentGeoFeatureGroup()
     doc = sketch.Document
     if _projects_from(sketch, other):
+        glob = sketch.getGlobalPlacement()
         sub = sketch.AttachmentSupport[0][1]
         sub = sub[0] if isinstance(sub, (tuple, list)) and sub else sub
         ref = doc.addObject("PartDesign::SubShapeBinder", "FaceRef")
@@ -123,6 +124,14 @@ def settle_support(sketch, body):
         _set_visible(ref, False)
         doc.recompute()
         sketch.AttachmentSupport = [(ref, "Face1")]
+        sketch.recompute()
+        # the copy's face has an origin of its own (a work plane's sheet): the sketch stays exactly where it was
+        # drawn (the user: a feature never moves its sketch)
+        frame = sketch.Placement.multiply(sketch.AttachmentOffset.inverse())
+        want = body.getGlobalPlacement().inverse().multiply(glob)
+        if not want.isSame(sketch.Placement, 1e-9):
+            sketch.AttachmentOffset = frame.inverse().multiply(want)
+            sketch.recompute()
     else:
         glob = sketch.getGlobalPlacement()
         sketch.MapMode = "Deactivated"
@@ -197,7 +206,7 @@ def is_detached_lump(feature):
     if body is None or body.TypeId != "PartDesign::Body":
         return False
     if not feature.isDerivedFrom("PartDesign::FeatureAddSub") or feature.TypeId.startswith("PartDesign::Subtractive") \
-            or feature.TypeId == "PartDesign::Pocket":
+            or feature.TypeId in ("PartDesign::Pocket", "PartDesign::FeatureSubtractivePython"):
         return False
     base = getattr(feature, "BaseFeature", None)
     return base is not None and _solid_count(feature) > _solid_count(base) >= 1
@@ -590,6 +599,13 @@ def show_result(body):
     view follows the model and isn't cluttered by profile sketches. A broken tip (invalid or no shape) would leave
     the view blank, so the nearest earlier feature that still has a shape is shown instead."""
     feats = [o for o in body.Group if o.isDerivedFrom("PartDesign::Feature")]
+    from incad.features import work
+    for o in body.Group:  # work planes of older files muted too
+        if o.TypeId == "PartDesign::Plane":
+            work.quiet_look(o)
+    for o in feats:  # an own Extrude / Revolve saved without a view provider draws nothing: give it one
+        if o.TypeId.endswith("Python") and getattr(getattr(o, "ViewObject", None), "Proxy", 0) is None:
+            show_like(o, getattr(o, "BaseFeature", None))
     tip = body.Tip
     shown = tip
     if tip is not None and _broken_shape(tip) and tip in feats:

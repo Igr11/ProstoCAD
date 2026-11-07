@@ -59,7 +59,7 @@ def gear_of(obj, sub):
         el = obj.getSubObject(sub)
     except Exception:
         return None
-    if el is None:
+    if el is None or el.isNull():  # a pick on an element that is gone (the log: "null shape")
         return None
     probe = Part.Vertex(el.CenterOfMass if el.ShapeType == "Face" else el.Vertexes[0].Point)
     for g in reversed(body.Group):

@@ -1,5 +1,7 @@
-"""Extrude (Inventor) = PartDesign Pad (Join) / Pocket (Cut); Intersect = a second body + Boolean Common;
-New Solid = the profile sketch moved into a new body."""
+"""Extrude (Inventor): ProstoCAD's own feature on OpenCASCADE (ExtrudeFeature, the geometry in
+incad.core.extrude_solid), a Join or a Cut; Intersect = a second body + Boolean Common; New Solid = the profile
+sketch moved into a new body. Files made before it hold FreeCAD's Pad (Join) / Pocket (Cut): they open and edit as
+they are. A Cut goes into the part (against the sketch's normal) unless flipped, as FreeCAD's Pocket does."""
 import FreeCAD as App
 
 from incad.core import document
@@ -7,7 +9,10 @@ from incad.features.common import Field, profile_of, value_param, value_text
 
 TITLE = "Extrude"
 ICON = "extrude"
-TYPES = ("PartDesign::Pad", "PartDesign::Pocket")
+JOIN, CUT = "PartDesign::FeatureAdditivePython", "PartDesign::FeatureSubtractivePython"  # ProstoCAD's own Extrude
+LEGACY = ("PartDesign::Pad", "PartDesign::Pocket")  # FreeCAD's, in files made before it
+TYPES = LEGACY + (JOIN, CUT)
+MARK = "InCadExtrude"  # on ProstoCAD's own Extrude: how its last result was made
 PROPS = {"distance": "Length", "distance2": "Length2", "taper": "TaperAngle"}
 FIELDS = (
     Field("operation", "Operation", "choice", (("join", "Join"), ("cut", "Cut"), ("intersect", "Intersect"),
@@ -38,6 +43,121 @@ def _normal(sk):
     return sk.Placement.Rotation.multVec(App.Vector(0, 0, 1))
 
 
+def claims(f):
+    return f.TypeId in LEGACY or MARK in getattr(f, "PropertiesList", ())
+
+
+def is_own(f):
+    """ProstoCAD's own Extrude (not a Pad / Pocket of an older file)."""
+    return f is not None and f.TypeId in (JOIN, CUT)
+
+
+def is_cut(f):
+    return f is not None and f.TypeId in ("PartDesign::Pocket", CUT)
+
+
+_EXTENTS = {"Length": "length", "UpToFirst": "first", "UpToLast": "last", "UpToFace": "face",
+            "ThroughAll": "through"}
+
+
+def _link_shape(link):
+    """The shape a To link names, in the Solid's coordinates: a face of a feature, a plane's face, an origin plane."""
+    if not link or link[0] is None:
+        raise ValueError("pick a face, a plane or a point for To")
+    obj, subs = link[0], [s for s in (link[1] or []) if s]
+    shape = getattr(obj, "Shape", None)
+    if shape is not None and not shape.isNull():
+        try:
+            return shape.getElement(subs[0]) if subs else shape
+        except Exception:
+            raise ValueError("the To face (%s of %s) is no longer there: pick it again" % (subs[0], obj.Label))
+    import Part  # an origin plane has no shape: its own plane
+    pl = obj.Placement
+    return Part.Plane(pl.Base, pl.Rotation.multVec(App.Vector(0, 0, 1))).toShape(-1, 1, -1, 1)
+
+
+class ExtrudeFeature:
+    """ProstoCAD's Extrude on OpenCASCADE (incad.core.extrude_solid): Pad's properties (Profile, Type, Length, SideType,
+    Reversed, TaperAngle, UpToFace and their second side), so the dialog reads and writes it as it did a Pad or
+    Pocket; a Join is a PartDesign additive feature, a Cut a subtractive one (patterns repeat them). Reversed is
+    physical: against the sketch's normal, for a Join and a Cut alike (a Cut's default, see _cut_by_default). The proxy; FreeCAD saves its module path and
+    class name in the file."""
+    KINDS = ["Length", "UpToLast", "UpToFirst", "UpToFace", "ThroughAll"]
+
+    def __init__(self, obj):
+        for name, kind, doc in (("Profile", "App::PropertyLinkSub", "The sketch extruded"),
+                                ("Type", "App::PropertyEnumeration", "How far it goes"),
+                                ("Type2", "App::PropertyEnumeration", "How far it goes on the second side"),
+                                ("Length", "App::PropertyLength", "Its length"),
+                                ("Length2", "App::PropertyLength", "Its length on the second side"),
+                                ("UpToFace", "App::PropertyLinkSub", "The face it goes to (To)"),
+                                ("UpToFace2", "App::PropertyLinkSub", "The face it goes to on the second side"),
+                                ("SideType", "App::PropertyEnumeration", "One side, symmetric or two sides"),
+                                ("Reversed", "App::PropertyBool", "Against the sketch's normal"),
+                                ("TaperAngle", "App::PropertyAngle", "The taper: above zero the outline grows"),
+                                ("TaperAngle2", "App::PropertyAngle", "The taper on the second side"),
+                                (MARK, "App::PropertyString", "How the result was made")):
+            if name not in obj.PropertiesList:
+                obj.addProperty(kind, name, "Extrude", doc)
+        obj.Type = obj.Type2 = self.KINDS
+        obj.Type, obj.Type2 = "Length", "Length"
+        obj.SideType = ["One side", "Symmetric", "Two sides"]
+        obj.SideType = "One side"
+        obj.Length, obj.Length2 = 10.0, 5.0
+        obj.setPropertyStatus(MARK, "Hidden")
+        obj.Proxy = self
+
+    def execute(self, obj):
+        from incad.core import extrude_solid
+        from incad.features.common import profile_of
+        sk = profile_of(obj)
+        if sk is None or sk.Shape.isNull():
+            raise ValueError("the Extrude has no profile")
+        faces = extrude_solid.profile_faces(sk.Shape)
+        origin, n = sk.Placement.Base, _normal(sk)
+        d = -n if obj.Reversed else n
+        base = _material(obj)
+        if obj.SideType == "One side" and _EXTENTS.get(obj.Type) == "face":
+            target = _link_shape(obj.UpToFace)  # To goes where its face is (Inventor; FreeCAD's Pad did too)
+            if not extrude_solid.ahead(target, origin, d) and extrude_solid.ahead(target, origin, -d):
+                d = -d
+
+        def spec(direction, kind, length, taper, link):
+            kind = _EXTENTS.get(kind, "length")
+            return (direction, kind, length, taper, base, _link_shape(link) if kind == "face" else None)
+        one = (obj.Type, obj.Length.Value, obj.TaperAngle.Value, obj.UpToFace)
+        if obj.SideType == "Symmetric":
+            half = (obj.Type, obj.Length.Value / 2) + one[2:]
+            sides = [spec(d, *half), spec(-d, *half)]
+        elif obj.SideType == "Two sides":
+            sides = [spec(d, *one), spec(-d, obj.Type2, obj.Length2.Value, obj.TaperAngle2.Value, obj.UpToFace2)]
+        else:
+            sides = [spec(d, *one)]
+        tool = extrude_solid.tool(faces, origin, sides)
+        shape, how = extrude_solid.combine(base, tool, "cut" if is_cut(obj) else "join", faces, origin, d,
+                                           bool(getattr(obj, "Refine", False)))
+        obj.AddSubShape = tool
+        setattr(obj, MARK, how)
+        obj.Shape = shape
+
+    def dumps(self):
+        return None
+
+    def loads(self, state):
+        return None
+
+
+def _new(container, operation, name="Extrude"):
+    """A new own Extrude in the Solid `container`."""
+    from incad.core import document
+    tip = getattr(container, "Tip", None)
+    tip = tip if getattr(tip, "TypeId", "").startswith("PartDesign::") else None  # a solid step's look, not a sketch's
+    f = container.newObject(_feature_type(operation), name)
+    ExtrudeFeature(f)
+    document.show_like(f, tip)  # (a Python feature made from code draws nothing without a view provider)
+    return f
+
+
 def default_operation(body, sk):
     """Cut when the profile lies inside the material (Inventor pre-selects Cut there), otherwise Join."""
     shape = body.Shape
@@ -57,17 +177,32 @@ def defaults(doc, body, profile):
     return values
 
 
-def _feature_type(operation):
-    return "PartDesign::Pocket" if operation == "cut" else "PartDesign::Pad"
+def _material(f):
+    """The material before the feature, or None when there is none."""
+    base = f.BaseFeature.Shape if f.BaseFeature is not None else None
+    return base if base is not None and not base.isNull() and base.Solids else None
+
+
+def _feature_type(operation, like=None):
+    """The type for a Join / Cut: ProstoCAD's own, or for a Pad / Pocket of an older file (`like`) its FreeCAD twin
+    (switched in place it keeps its family: an own Extrude would refuse when a sketch sits on its face)."""
+    if like is not None and like.TypeId in LEGACY:
+        return "PartDesign::Pocket" if operation == "cut" else "PartDesign::Pad"
+    return CUT if operation == "cut" else JOIN
 
 
 def _type(f, extent):
-    cut = f.TypeId == "PartDesign::Pocket"
+    cut = is_cut(f)
     return ("ThroughAll" if cut else "UpToLast") if extent == "through_all" else _TYPE.get(extent, "Length")
 
 
+def _cut_by_default(f):
+    """True for an own Extrude's Cut: Reversed (against the sketch's normal) is its default, into the part, as
+    FreeCAD's Pocket goes there unless Reversed."""
+    return is_own(f) and is_cut(f)
+
+
 def _apply(doc, f, values):
-    cut = f.TypeId == "PartDesign::Pocket"
     extent = values.get("extent", "distance")
     f.Type = _type(f, extent)
     if extent == "to" and values.get("to_face"):
@@ -82,9 +217,11 @@ def _apply(doc, f, values):
     else:
         _drop_helpers(doc, f, side=2)
     f.SideType = {"symmetric": "Symmetric", "two_sides": "Two sides"}.get(direction, "One side")
-    f.Reversed = direction == "flip"
+    f.Reversed = (direction == "flip") != _cut_by_default(f)
     if extent == "to_next" and direction == "default" and _material_only_behind(f):
-        f.Reversed = True  # Inventor: To Next goes where the part is
+        f.Reversed = not f.Reversed  # Inventor: To Next goes where the part is
+    if extent == "to" and direction in ("default", "flip") and is_own(f) and _to_face_behind(f):
+        f.Reversed = not f.Reversed  # To goes where its face is: the arrow shows that way
     value_param(doc, f, "Length", values.get("distance") or "10 mm", "length")
     if direction == "two_sides":
         value_param(doc, f, "Length2", values.get("distance2") or "5 mm", "length")
@@ -132,7 +269,7 @@ def _tapered_through(f, on):
     setattr(f, REACH, True)
     f.Type = "Length"
     f.setExpression("Length", None)
-    f.Length = reach
+    f.Length = reach * (2 if f.SideType == "Symmetric" else 1)  # (a symmetric Length is both halves)
 
 
 def follow_reach(doc):
@@ -142,6 +279,7 @@ def follow_reach(doc):
     for f in doc.Objects:
         if REACH in getattr(f, "PropertiesList", ()):
             reach = _reach(f)
+            reach = reach * (2 if f.SideType == "Symmetric" else 1) if reach is not None else None
             if reach is not None and abs(reach - f.Length.Value) > 1e-6:
                 todo.append((f, reach))
     if not todo:
@@ -277,6 +415,22 @@ def _to_target(doc, f, pick, side=1):
     return result
 
 
+def _to_face_behind(f):
+    """True when f's To face lies only behind the way it goes (a sketch above the part, To its top face)."""
+    from incad.core import extrude_solid
+    sk = profile_of(f)
+    if sk is None or sk.Shape.isNull() or f.Type != "UpToFace":
+        return False
+    try:
+        target = _link_shape(f.UpToFace)
+        n = _normal(sk)
+        d = -n if f.Reversed else n
+        return not extrude_solid.ahead(target, sk.Placement.Base, d) and \
+            extrude_solid.ahead(target, sk.Placement.Base, -d)
+    except Exception:
+        return False
+
+
 def _material_only_behind(f):
     """True when the part lies only against this feature's default direction (a sketch above the part: To Next
     would find nothing)."""
@@ -286,8 +440,8 @@ def _material_only_behind(f):
     if sk is None or base is None or base.isNull() or sk.Shape.isNull():
         return False
     n = _normal(sk)
-    if f.TypeId == "PartDesign::Pocket":
-        n = -n  # a Pocket cuts against the sketch's normal
+    if is_cut(f):
+        n = -n  # a Cut goes against the sketch's normal
     c = sk.Shape.BoundBox.Center
     reach = base.BoundBox.DiagonalLength + (c - base.BoundBox.Center).Length + 1.0
 
@@ -326,15 +480,16 @@ def create(doc, body, profile, values):
         target.addObject(profile)
         document.settle_support(profile, target)  # on a face of the part: not the whole part in the new Solid
     before = _solids(body.Tip) if body.Tip is not None else 0
-    f = target.newObject(_feature_type("cut" if operation == "cut" else "join"), "Extrude")
+    f = _new(target, "cut" if operation == "cut" else "join")
     f.Profile = profile
     _apply(doc, f, values)
     if operation == "join" and before:
         doc.recompute()
         if _solids(f) > before and _touches(f):  # some of it joins the part: it stays a Join (one profile on the part,
             from incad.core import log           # one beside it went into a new Solid of two lumps before)
-            log.report("warning", "%s: a shape of its profile doesn't touch the part: it stays a separate lump in "
-                       "the Solid (move it onto the part, or extrude it as a New Solid)" % f.Label)
+            log.report("warning", "%s: a shape of its profile doesn't reach into the part (it lies beside it, or "
+                       "touches it only along a line or at a point): it stays a separate lump in the Solid (move it "
+                       "a little into the part, or extrude it as a New Solid)" % f.Label)
         elif _solids(f) > before:  # the new solid does not touch the part: a piece of its own, not a second
             _drop_helpers(doc, f)   # lump in the part's body (nothing could be shelled or filleted there)
             target.removeObject(f)
@@ -343,7 +498,7 @@ def create(doc, body, profile, values):
             body.removeObject(profile)
             target.addObject(profile)
             document.settle_support(profile, target)
-            f = target.newObject(_feature_type("join"), "Extrude")
+            f = _new(target, "join")
             f.Profile = profile
             _apply(doc, f, values)
             document.show_result(body)  # the first try, in the part, hid the part's last step (FreeCAD hides a base)
@@ -365,21 +520,28 @@ def _pad_of(feature):
     return feature
 
 
+def _starts_own_solid(doc, f):
+    """True for the Join a Solid of its own starts with (New Solid): no material before it, off the part. A later
+    feature in that Solid (a Cut through the box drawn beside the part) is a Join or a Cut of that Solid."""
+    body = f.getParentGeoFeatureGroup()
+    return body is not None and document.primary_body(doc) is not body and _material(f) is None
+
+
 def read(doc, feature):
     if feature.TypeId == "PartDesign::Boolean":
         values = read(doc, _pad_of(feature))
         values["operation"] = "intersect"
         return values
     f = feature
-    operation = "cut" if f.TypeId == "PartDesign::Pocket" else "join"
-    body = f.getParentGeoFeatureGroup()
-    if operation == "join" and body is not None and document.primary_body(doc) is not body:
+    operation = "cut" if is_cut(f) else "join"
+    if operation == "join" and _starts_own_solid(doc, f):
         operation = "new_solid"
     extent = {"Length": "distance", "UpToFirst": "to_next", "UpToFace": "to", "ThroughAll": "through_all",
               "UpToLast": "through_all"}.get(f.Type, "distance")
     if getattr(f, REACH, False):
         extent = "through_all"
-    direction = {"Symmetric": "symmetric", "Two sides": "two_sides"}.get(f.SideType, "flip" if f.Reversed else "default")
+    direction = {"Symmetric": "symmetric", "Two sides": "two_sides"}.get(
+        f.SideType, "flip" if f.Reversed != _cut_by_default(f) else "default")
     def picked(prop, link):
         if getattr(f, prop, ""):
             return getattr(f, prop)  # through a helper: what was picked
@@ -402,13 +564,13 @@ def update(doc, feature, values):
     is_boolean = feature.TypeId == "PartDesign::Boolean"  # decided first: a replaced Pad no longer exists
     f = _pad_of(feature)
     wanted = values.get("operation", "join")
-    own = f.getParentGeoFeatureGroup() is not document.primary_body(doc)
+    own = _starts_own_solid(doc, f)
     if wanted in ("join", "cut") and (is_boolean or own) and read(doc, feature)["operation"] != wanted:
         raise ValueError("This extrude is a Solid of its own (New Solid or Intersect): it can't turn into a %s of "
                          "the part here. Join or cut it with Boolean, or delete it and "
                          "extrude again" % ("Join" if wanted == "join" else "Cut"))
-    if wanted in ("join", "cut") and f.TypeId != _feature_type(wanted) and not is_boolean:
-        f = _replace(doc, f, _feature_type(wanted))
+    if wanted in ("join", "cut") and f.TypeId != _feature_type(wanted, f) and not is_boolean:
+        f = _replace(doc, f, _feature_type(wanted, f))
     _apply(doc, f, values)
     return feature if is_boolean else f
 
@@ -452,9 +614,13 @@ def _replace(doc, old, type_id):
     body.removeObject(old)
     doc.removeObject(old.Name)
     new = doc.addObject(type_id, "Extrude")
+    if type_id in (JOIN, CUT):
+        ExtrudeFeature(new)
     body.insertObject(new, after, True) if after is not None else body.insertObject(new, body.Group[0] if body.Group else None, False)
     new.Label = label
     new.Profile = profile
+    from incad.core import document
+    document.show_like(new, getattr(new, "BaseFeature", None))  # (a re-made feature draws nothing without it)
     for h in helpers:  # the To target's helpers follow the re-made feature
         setattr(h, HELPER, new.Name)
     for prop, text in up_to.items():

@@ -16,6 +16,7 @@ from pivy import coin  # noqa: E402,F401
 from PySide6.QtTest import QTest  # noqa: E402
 from incad.qt import QtCore  # noqa: E402
 from incad.core import commands, document, prefs  # noqa: E402
+from incad.features import own_pattern  # noqa: E402
 from incad.ui import shell  # noqa: E402
 
 PART = os.environ.get("INCAD_REAL_PART", os.path.join(os.environ["INCAD_REPO"], "tests", "gui", "data",
@@ -117,7 +118,7 @@ def test_1_clicking_the_thread_spaces_three_shafts_equally_from_the_near_end():
     assert "dependent" in shown, shown
     ok()
     p = tip()
-    assert p.TypeId == "PartDesign::LinearPattern", p.TypeId
+    assert own_pattern.is_own(p) and own_pattern.kind_of(p) == "rectangular", p.TypeId  # our own pattern
     assert "Invalid" not in p.State, p.getStatusString()
     assert [o.Name for o in p.Originals] == ["Extrude002", "Thread", "ThreadChamfer"], [o.Name for o in p.Originals]
     assert abs(p.Length.Value - 14.0) < 0.05 and p.Reversed, (p.Length.Value, p.Reversed)  # 7 mm steps, leftward
@@ -226,7 +227,7 @@ def test_5_edit_to_five_then_cut_gives_five_holes_in_the_solid():
     assert not dialog().error_text(), dialog().error_text()
     ok()
     cut = tip()
-    assert cut.TypeId == "PartDesign::Pocket", cut.TypeId
+    assert cut.TypeId == "PartDesign::FeatureSubtractivePython", cut.TypeId
     assert "Invalid" not in cut.State, cut.getStatusString()
     removed = before - cut.Shape.Volume
     assert abs(removed - 5 * math.pi * 1.0 ** 2 * 10) < 5.0, removed  # five Ø2 holes through 10 mm

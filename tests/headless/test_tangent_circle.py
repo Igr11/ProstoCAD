@@ -37,6 +37,22 @@ class TangentCircleTest(unittest.TestCase):
         self.assertAlmostEqual(c.Center.y, c.Radius, places=5)
         self.assertGreater(self.sk.solve(), -1)
 
+    def test_two_lines_placed_where_the_pointer_shows_it(self):
+        """Two lines picked, then a click away from them: the circle touches both, as big as shown at the pointer
+        (the user: "two lines or three"; the circle follows the pointer from the first touch)."""
+        picks = [self.line((0, 0), (40, 0)), self.line((0, 0), (0, 40))]
+        geos = [tangent_circle.geometry(self.sk, g) for g in picks]
+        centre, r = tangent_circle.preview(geos[:1], V(5, 8, 0))  # one pick: centred on the pointer, touching it
+        self.assertAlmostEqual(r, 8, places=6)
+        centre, r = tangent_circle.preview(geos, V(12, 12, 0))
+        self.assertAlmostEqual(centre.x, r, places=5)
+        self.assertAlmostEqual(centre.y, r, places=5)
+        self.assertAlmostEqual(r, 12, places=4)
+        k = tangent_circle.add(self.sk, picks, V(12, 12, 0))
+        c = self.sk.Geometry[k]
+        self.assertAlmostEqual(c.Radius, 12, places=4)
+        self.assertAlmostEqual(c.Center.x, 12, places=4)
+
     def test_a_line_and_a_circle(self):
         a = self.line((-30, 0), (30, 0))
         b = self.sk.addGeometry(Part.Circle(V(0, 20, 0), V(0, 0, 1), 8))

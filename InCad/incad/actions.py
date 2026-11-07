@@ -78,6 +78,24 @@ def set_tool_mode(text):
     raise ValueError("This FreeCAD version has no '%s' option for this tool" % text)
 
 
+def set_tool_check(text, on):
+    """Tick or clear a check box of the running Sketcher tool's widget by its label (FreeCAD adds the key:
+    "Rounded corners (U)"); False when it has none."""
+    from incad.qt import QtWidgets
+    for w in QtWidgets.QApplication.allWidgets():
+        if isinstance(w, QtWidgets.QCheckBox) and w.text().replace("&", "").startswith(text):
+            if w.isChecked() != bool(on):
+                w.setChecked(bool(on))
+            return True
+    return False
+
+
+# FreeCAD's Rectangle and Rounded Rectangle are one tool whose "Rounded corners" and "Frame" boxes it remembers: after
+# one Rounded Rectangle every plain Rectangle came out rounded (the user's air: "everything has to be sharp")
+_RECT_CHECKS = {"Sketcher_CreateRectangle": {"Rounded corners": False, "Frame": False},
+                "Sketcher_CreateOblong": {"Rounded corners": True, "Frame": False}}
+
+
 def run_sketch_tool(name, mode=None):
     from incad.ui import shell
     if shell.instance() is not None:  # Project Geometry: a pick on another Solid is copied (FreeCAD can't link it)
@@ -85,6 +103,8 @@ def run_sketch_tool(name, mode=None):
     run_std(name)
     if mode:
         set_tool_mode(mode)
+    for text, on in _RECT_CHECKS.get(name, {}).items():
+        set_tool_check(text, on)
     from incad.ui import rectangle_preview
     rectangle_preview.start(name)  # a rectangle's diagonals while it is drawn
 
@@ -92,6 +112,29 @@ def run_sketch_tool(name, mode=None):
 def _gui():
     import FreeCADGui
     return FreeCADGui
+
+
+def break_link():
+    """Sketch ▸ Break Link: the projected edges picked (or under the right-click) become the sketch's own geometry of
+    their kind, no longer following the part (then Trim cuts them)."""
+    from incad.core import log, safe, sketch_trim
+    from incad.ui import shell
+    from incad.ui.tangent_circle_tool import from_subname
+    inst = shell.instance()
+    sk = inst.sketches.editing() if inst is not None else None
+    if sk is None:
+        raise ValueError("Open a sketch first")
+    picked = [sub for sel in _gui().Selection.getSelectionEx(sk.Document.Name) if sel.Object is sk
+              for sub in sel.SubElementNames]
+    geos = [g for g in (from_subname(s) for s in picked) if g is not None and g <= -3]
+    if not geos:
+        raise ValueError("Break Link: right-click a projected edge (one taken from the part)")
+    r = safe.run_safely("Break Link", lambda: sketch_trim.break_link(sk, geos), sk.Document, only=[sk])
+    if not r.ok:
+        raise ValueError(r.error)
+    _gui().Selection.clearSelection()
+    log.report("info", "%d projected edge%s now the sketch's own: it no longer follows the part" % (
+        len(geos), "" if len(geos) == 1 else "s"))
 
 
 def tangent_circle():
@@ -108,7 +151,15 @@ def run_std(name, index=0):
     if name.startswith("Sketcher_"):
         from incad.ui import rectangle_preview
         rectangle_preview.stop()  # another Sketcher tool: no rectangle's diagonals over its edit curve
+        from incad.ui import trim_watch
+        trim_watch.stop()
     _gui().runCommand(name, index)
+    if name == "Sketcher_Trimming":  # a projected edge is trimmed too (FreeCAD's Trim leaves it alone)
+        from incad.ui import shell, trim_watch
+        inst = shell.instance()
+        sk = inst.sketches.editing() if inst is not None else None
+        if sk is not None:
+            trim_watch.start(sk)
 
 
 def ask_new():
@@ -1804,7 +1855,11 @@ def commands():
                         "(Step) or move with them (Together)"),
         Command(id="sketch.circle_tangent", label="Tangent Circle", icon="circle_tangent",
                 handler=lambda: tangent_circle(), contexts=frozenset({"sketch"}),
-                tooltip="A circle tangent to three lines, arcs or circles: click them one after another (construction ones too)"),
+                tooltip="A circle tangent to two or three lines, arcs or circles: click them one after another (construction and "
+                        "projected ones too); after two, a click away places it touching those two"),
+        Command(id="sketch.break_link", label="Break Link", icon="construction", handler=lambda: break_link(),
+                contexts=frozenset({"sketch"}),
+                tooltip="A projected edge becomes the sketch's own line, no longer following the part (then Trim cuts it)"),
         Command(id="sketch.construction", label="Construction", icon="construction",
                 handler=lambda: _construction(), contexts=frozenset({"sketch"}), checkable=True,
                 is_checked=lambda: _construction_on(),
@@ -1962,7 +2017,8 @@ def commands():
                 contexts=frozenset({"part"}), tooltip="Area of the selected faces"),
         Command(id="inspect.mass", label="Mass Properties", icon="mass", handler=inspect_mass,
                 contexts=frozenset({"part"})),
-    ] + [Command(id=i, label=lbl, icon=icon, handler=(lambda n=cmd, m=_BASE_MODES.get(i): run_sketch_tool(n, m)),
+    ] + [Command(id=i, label=lbl, icon=icon, handler=(lambda n=cmd, m=_BASE_MODES.get(i): run_sketch_tool(n, m))
+                 if i != "sketch.slot" else (lambda: _slot("c2c")),  # our own: it starts 2 mm wide, never 0
                  shortcut=sc, contexts=frozenset({"sketch"})) for i, (lbl, icon, cmd, sc) in SKETCHER.items()] + \
         [Command(id=i, label=lbl, icon=icon, handler=(lambda n=cmd, m=mode: run_sketch_tool(n, m)),
                  contexts=frozenset({"sketch"})) for i, (lbl, icon, cmd, mode) in SKETCH_VARIANTS.items()]

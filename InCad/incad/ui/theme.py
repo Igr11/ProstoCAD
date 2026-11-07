@@ -130,18 +130,19 @@ SKETCH_COLORS = {
     # calm constraint colours (FreeCAD's red/orange was too loud): blue-grey symbols and dimensions; construction
     # geometry orange (the user: told apart from the real lines at a glance) — a projected line switched to
     # construction too (ExternalColor; a normal projected one keeps FreeCAD's ExternalDefiningColor) — the line
-    # being drawn blue
-    "light": dict(EditedEdgeColor="#1d1d1f", SketchEdgeColor="#1d1d1f", SketchVertexColor="#1d1d1f",
+    # being drawn blue; a sketch shown outside its edit blue too, 3 px (the user: seen on a plane and on the part)
+    "light": dict(EditedEdgeColor="#1d1d1f", SketchEdgeColor="#1565d8", SketchVertexColor="#1d1d1f",
                   FullyConstrainedColor="#1a8a2e", ConstructionColor="#e67e22", ConstrainedDimColor="#35557f",
                   FullyConstraintConstructionElementColor="#e67e22", ExternalColor="#e67e22",
                   ExprBasedConstrDimColor="#6a5a9e", NonDrivingConstrDimColor="#7d8896", CursorTextColor="#1d1d1f",
                   CreateLineColor="#0a64d6", ConstrainedIcoColor="#5a7698", DeactivatedConstrDimColor="#9aa3ad"),
-    "dark": dict(EditedEdgeColor="#f2f2f2", SketchEdgeColor="#f2f2f2", SketchVertexColor="#f2f2f2",
+    "dark": dict(EditedEdgeColor="#f2f2f2", SketchEdgeColor="#2673ff", SketchVertexColor="#f2f2f2",
                  FullyConstrainedColor="#5ad16b", ConstructionColor="#f39c4a", ConstrainedDimColor="#9db8de",
                  FullyConstraintConstructionElementColor="#f39c4a", ExternalColor="#f39c4a",
                  ExprBasedConstrDimColor="#b9a8e6", NonDrivingConstrDimColor="#8d99a8", CursorTextColor="#f2f2f2",
                  CreateLineColor="#5aa2ff", ConstrainedIcoColor="#7f9cc0", DeactivatedConstrDimColor="#6b7480"),
 }
+SHOWN_SKETCH_WIDTH = 3.0
 SKETCH_KEYS = {
     SKETCH_ROOT: {"ShowDialogOnDistanceConstraint": "Bool", "ShowDimensionalName": "Bool",
                   "DimensionalStringFormat": "String", "LeaveSketchWithEscape": "Bool"},

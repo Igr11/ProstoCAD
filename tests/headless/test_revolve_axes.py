@@ -80,6 +80,24 @@ class RevolveAxesTest(unittest.TestCase):
         back = revolve.read(self.doc, f)  # read back as the line picked: the same axis
         self.assertEqual((back["axis_mode"], back["axis_ref"]), ("reference", "%s:Edge4" % sk.Name))
 
+    def test_a_normal_line_beside_the_profile_is_an_axis_and_left_out_of_it(self):
+        """The user's law: normal, construction and projected lines are equal axes. A normal line beside the profile
+        is no loose piece of it: Revolve about it gives what a construction line there gives (was refused), and the
+        line stays normal (it used to be made construction)."""
+        sk = profile(self.body, self.xz, pts=((0, 0), (10, 0), (10, 20), (0, 20)))
+        sk.addGeometry(Part.LineSegment(App.Vector(-5, -5, 0), App.Vector(-5, 25, 0)))  # Line 5, normal
+        self.doc.recompute()
+        self.assertIn("Line5", [v for v, _ in revolve.axis_line_options(sk)])
+        f = self.make(sk, axis_mode="construction", axis_construction="Line5")
+        self.assertNotIn("Invalid", f.State, f.getStatusString())
+        self.assertAlmostEqual(f.Shape.Volume, 3.14159265358979 * (15 ** 2 - 5 ** 2) * 20, places=1)
+        self.assertFalse(sk.getConstruction(4))  # Line 5 keeps its kind
+        back = revolve.read(self.doc, f)
+        self.assertEqual((back["axis_mode"], back["axis_ref"]), ("reference", "%s:Edge5" % sk.Name))
+        g = revolve.update(self.doc, f, dict(back, axis_construction="Line5"))  # the dialog's old name still works
+        self.doc.recompute()
+        self.assertAlmostEqual(g.Shape.Volume, 3.14159265358979 * (15 ** 2 - 5 ** 2) * 20, places=1)
+
     def test_an_area_copy_offers_the_drawn_sketchs_lines(self):
         """A sketch whose lines cross is extruded through an area copy: its lines (construction ones too) are still
         the axes, held on the sketch the user drew."""
@@ -120,7 +138,7 @@ class RevolveAxesTest(unittest.TestCase):
         values.update(axis_ref="%s:Edge%d" % (pad.Name, edge), operation="cut")
         sk2 = profile(self.body, self.xz, pts=((5, 2), (8, 2), (8, 8), (5, 8)))
         g = self.make(sk2, axis_mode="reference", axis_ref="%s:Edge%d" % (pad.Name, edge), operation="cut")
-        self.assertEqual(g.TypeId, "PartDesign::Groove")
+        self.assertEqual(g.TypeId, revolve.CUT)
         self.assertIn("Edge%d" % edge, g.ReferenceAxis[1])
 
     def test_reference_mode_without_a_pick_says_so(self):
@@ -159,6 +177,8 @@ class RevolveAxesTest(unittest.TestCase):
         """Picked points can be anywhere on the solid; a revolve axis must lie in the profile's plane, so the two
         points are projected onto it. An axis beside the profile then revolves (it used to fail as out-of-plane)."""
         sk = profile(self.body, self.xz)  # profile in the XZ plane (y = 0), x from 10 to 18
+        util.add_pad(self.body, util.add_rect_sketch(self.body, 30, 20, name="B"), 6)  # give it something to cut
+        self.doc.recompute()
         # two points well OFF the plane (y = 7) to the LEFT of the profile; their projection is the axis
         f = self.make(sk, operation="cut",
                       axis_points="2 7 -5;2 7 30", axis_mode="two_points")
@@ -166,8 +186,6 @@ class RevolveAxesTest(unittest.TestCase):
         helper = f.ReferenceAxis[0]
         pts = revolve.parse_points(getattr(helper, revolve.POINTS))
         self.assertTrue(all(abs(p.y) < 1e-6 for p in pts), pts)  # projected onto y = 0
-        pad = util.add_pad(self.body, util.add_rect_sketch(self.body, 30, 20, name="B"), 6)  # give it something to cut
-        self.doc.recompute()
 
     def test_two_points_need_two_different_points(self):
         sk = profile(self.body, self.xz)
@@ -259,7 +277,7 @@ class RevolveProjectedAxisTest(unittest.TestCase):
         self.assertFalse(line.Visibility)
         self.assertGreater(f.Shape.Volume, 1)
         back = revolve.read(self.doc, f)
-        self.assertEqual(back["axis_mode"], "two_points")                 # the helper reads back as its axis line
+        self.assertEqual((back["axis_mode"], back["axis_construction"]), ("construction", value))  # its own line
 
     def test_an_edge_perpendicular_to_the_sketch_projects_to_a_point_and_is_not_offered(self):
         """A projection cannot be perpendicular to its own plane (the user's point). An edge whose direction IS
@@ -295,8 +313,8 @@ class RevolveProjectedAxisTest(unittest.TestCase):
         self.assertLess(body.Shape.Volume, v0 - 1)
 
     def test_a_projected_line_that_is_normal_geometry_still_revolves(self):
-        """Projected edges are normal geometry by default (Inventor): the axis line is then part of the sketch's
-        shape, an open wire beside the profile. Revolving around it still works."""
+        """Projected edges are normal geometry by default: the axis line is then part of the sketch's shape, an open
+        wire beside the profile. Revolving around it still works, and the line keeps its kind."""
         from incad.core import sketch
         self.assertTrue(sketch.adopt_projections(self.sk))
         ext = sketch.projected(self.sk)[0]
@@ -308,8 +326,7 @@ class RevolveProjectedAxisTest(unittest.TestCase):
         self.doc.recompute()
         self.assertNotIn("Invalid", f.State, f.getStatusString())
         self.assertGreater(f.Shape.Volume, 1)
-        self.assertFalse(sketch.is_defining(self.sk, ext), "the lone axis line became construction")
-        self.assertFalse(sketch.adopt_projections(self.sk), "and stays so: it is recorded as the user's choice")
+        self.assertTrue(sketch.is_defining(self.sk, ext), "the axis line stays normal geometry")
 
     def test_a_projected_line_that_closes_the_profile_stays_normal_and_revolves(self):
         """A profile drawn up to the projected axis line is closed BY it: that line stays normal geometry."""
@@ -345,3 +362,32 @@ class RevolveProjectedAxisTest(unittest.TestCase):
         values = revolve.defaults(self.doc, self.body, self.sk)
         self.assertEqual(values["axis_mode"], "construction")
         self.assertTrue(values["axis_construction"].startswith("ext"))
+
+    def test_an_axis_on_a_projected_edge_follows_the_edge_when_the_part_changes(self):
+        """The axis is the projected edge itself: the block grows 10 -> 12, its top edge moves up, the revolve turns
+        about the new edge (it stayed about the old one, silently) and still reads back as that projected line."""
+        import math
+        doc = util.new_doc("RP3")
+        document.make_part(doc, "mm")
+        body = document.primary_body(doc)
+        pad = util.add_pad(body, util.add_rect_sketch(body, 20, 10, name="Base"), 10)
+        doc.recompute()
+        top = next(i + 1 for i, e in enumerate(pad.Shape.Edges) if e.Curve.TypeId == "Part::GeomLine"
+                   and all(abs(v.Point.y) < 1e-6 and abs(v.Point.z - 10) < 1e-6 for v in e.Vertexes))
+        xz = [o for o in body.Origin.OriginFeatures if o.Role == "XZ_Plane"][0]
+        sk = profile(body, xz, pts=((0, 15), (20, 15), (20, 20), (0, 20)))
+        sk.addExternal(pad.Name, "Edge%d" % top)
+        doc.recompute()
+        values = revolve.defaults(doc, body, sk)
+        values.update(axis_mode="construction", axis_construction="ext0")
+        f = revolve.create(doc, body, sk, values)
+        doc.recompute()
+        # tube r 5..10 about the edge, a quarter of it inside the block
+        self.assertAlmostEqual(f.Shape.Volume, 2000 + 0.75 * math.pi * (10 ** 2 - 5 ** 2) * 20, 2)
+        pad.Length = 12
+        doc.recompute()
+        self.assertAlmostEqual(revolve.axis_helper(f).Placement.Base.z, 12, 6)
+        self.assertAlmostEqual(f.Shape.Volume, 2400 + 0.75 * math.pi * (8 ** 2 - 3 ** 2) * 20, 2)
+        back = revolve.read(doc, f)
+        self.assertEqual((back["axis_mode"], back["axis_construction"]), ("construction", "ext0"))
+        App.closeDocument(doc.Name)

@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import FreeCAD as App
@@ -33,7 +34,7 @@ class ExtrudeTest(unittest.TestCase):
         v = extrude.defaults(self.doc, self.body, self.sk)
         self.assertEqual((v["operation"], v["extent"], v["direction"], v["distance"]), ("join", "distance", "default", "10 mm"))
         f = self.make()
-        self.assertEqual(f.TypeId, "PartDesign::Pad")
+        self.assertEqual(f.TypeId, extrude.JOIN)
         self.assertAlmostEqual(f.Shape.Volume, 20 * 10 * 10, places=3)
         self.assertEqual(model.bound_parameter(f, "Length"), "d0")
         self.assertIs(kind_for(f), extrude)
@@ -73,7 +74,7 @@ class ExtrudeTest(unittest.TestCase):
         name = model.bound_parameter(f, "Length")
         g = extrude.update(self.doc, f, dict(extrude.read(self.doc, f), operation="cut"))
         self.doc.recompute()
-        self.assertEqual(g.TypeId, "PartDesign::Pocket")
+        self.assertEqual(g.TypeId, extrude.CUT)
         self.assertEqual(model.bound_parameter(g, "Length"), name)
         self.assertIs(self.body.Tip, g)
         self.assertLess(g.Shape.Volume, base.Shape.Volume)
@@ -102,7 +103,7 @@ class ExtrudeTest(unittest.TestCase):
             extrude.update(self.doc, base, dict(extrude.read(self.doc, base), operation="cut"))
         self.assertIn("OnTop", str(ctx.exception))
         self.assertEqual(sk2.AttachmentSupport[0][0], base)
-        self.assertEqual(base.TypeId, "PartDesign::Pad")
+        self.assertEqual(base.TypeId, extrude.JOIN)
 
     def test_up_to_a_work_plane(self):
         plane = self.body.newObject("PartDesign::Plane", "Limit")
@@ -121,7 +122,7 @@ class ExtrudeTest(unittest.TestCase):
         f = extrude.create(self.doc, self.body, sk2, dict(extrude.defaults(self.doc, self.body, sk2),
                                                           operation="cut", extent="through_all", direction="symmetric"))
         self.doc.recompute()
-        self.assertEqual((f.TypeId, f.Type), ("PartDesign::Pocket", "ThroughAll"))
+        self.assertEqual((f.TypeId, f.Type), (extrude.CUT, "ThroughAll"))
         self.assertAlmostEqual(f.Shape.Volume, 20 * 10 * 10 - 4 * 4 * 10, places=3)
 
     def test_two_sides(self):
@@ -152,6 +153,31 @@ class ExtrudeTest(unittest.TestCase):
         g = extrude.create(self.doc, self.body, touching, extrude.defaults(self.doc, self.body, touching))
         self.doc.recompute()
         self.assertIs(g.getParentGeoFeatureGroup(), self.body, "a join that touches stays in the part")
+
+    def test_a_disc_resting_on_the_top_joins_sound(self):
+        """A circle extruded so it only touches the block's top along a line (the user's air: a disc on a block)
+        made a faulty solid, and every later feature failed on it. The own Extrude keeps it exact and sound: the disc
+        and the block touch only along a line, so they stay two solids of the part (the user is told), each sound."""
+        import Sketcher
+        from incad.features.common import profile_of
+        self.make()
+        disc = self.body.newObject("Sketcher::SketchObject", "Disc")
+        disc.Placement = App.Placement(App.Vector(0, 5, 0), App.Rotation(App.Vector(1, 0, 0), 90))
+        disc.addGeometry(Part.Circle(App.Vector(10, 15, 0), App.Vector(0, 0, 1), 5))
+        disc.addConstraint(Sketcher.Constraint("Radius", 0, 5))
+        self.doc.recompute()
+        f = extrude.create(self.doc, self.body, disc, dict(
+            extrude.defaults(self.doc, self.body, disc), operation="join", distance="4 mm", direction="symmetric"))
+        self.doc.recompute()
+        self.assertTrue(f.Shape.isValid())
+        f.Shape.check(True)  # raises on a faulty solid
+        self.assertAlmostEqual(f.Shape.Volume, 2000 + 3.141592653589793 * 25 * 4, places=6)
+        self.assertIs(profile_of(f), disc)
+        disc.setDatum(0, App.Units.Quantity("6 mm"))  # a bigger disc reaches into the block: one solid, still sound
+        self.doc.recompute()
+        self.assertAlmostEqual(f.Shape.BoundBox.ZMax, 15 + 6, delta=0.01)
+        self.assertEqual(len(f.Shape.Solids), 1)
+        f.Shape.check(True)
 
     def _on_top_away(self, name="Away", project=False):
         """A sketch on the part's top face whose 4 x 4 square lies off the part (the user's D-shape on the hex)."""
@@ -443,3 +469,232 @@ class SketchOnAnotherSolidTest(unittest.TestCase):
         self.assertLess(f.Shape.Volume, self.box.Shape.Volume - 1)
         self.assertEqual(len(document.bodies(self.doc)), 2)
         self.assertAlmostEqual(self.body.Tip.Shape.Volume, 2000, places=6, msg="the part is untouched")
+
+
+class OwnExtrudeTest(unittest.TestCase):
+    """ProstoCAD's own Extrude on OpenCASCADE (the user's law: "the extrude just needs to work, period"). A circle
+    sketched on a block's face, inscribed in it, extruded out as a Join: OCC's fuse lost half the volume (the user's
+    air2); sewn on the face it is exact and sound."""
+
+    def setUp(self):
+        self.doc = util.new_doc("Own")
+        self.body = document.make_part(self.doc)
+        self.sk = util.add_rect_sketch(self.body, w=40, h=30)
+        self.doc.recompute()
+        self.block = extrude.create(self.doc, self.body, self.sk, dict(
+            extrude.defaults(self.doc, self.body, self.sk), operation="join", distance="10 mm"))
+        self.doc.recompute()
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def on_face(self, test, name="On"):
+        """A sketch on the block's face `test` picks, its frame's origin at the face's own placement."""
+        base = self.body.Tip
+        i = next(i for i, f in enumerate(base.Shape.Faces) if f.Surface.TypeId == "Part::GeomPlane" and test(f))
+        sk = self.body.newObject("Sketcher::SketchObject", name)
+        sk.AttachmentSupport = [(base, "Face%d" % (i + 1))]
+        sk.MapMode = "FlatFace"
+        self.doc.recompute()
+        return sk
+
+    def circle(self, sk, centre, r):
+        local = sk.getGlobalPlacement().inverse().multVec(centre)
+        sk.addGeometry(Part.Circle(App.Vector(local.x, local.y, 0), App.Vector(0, 0, 1), r))
+        self.doc.recompute()
+
+    def extrude(self, sk, **values):
+        f = extrude.create(self.doc, self.body, sk, dict(extrude.defaults(self.doc, self.body, sk), **values))
+        self.doc.recompute()
+        self.assertNotIn("Invalid", f.State, f.getStatusString())
+        return f
+
+    def sound(self, shape, volume, solids=1):
+        self.assertTrue(shape.isValid())
+        shape.check(True)  # raises on a faulty solid (faces crossing themselves)
+        self.assertEqual(len(shape.Solids), solids)
+        self.assertAlmostEqual(shape.Volume, volume, delta=1e-6 * volume)
+
+    def shell_on(self, f):
+        from incad.features import dressup
+        bottom = next(i + 1 for i, g in enumerate(f.Shape.Faces)
+                      if g.Surface.TypeId == "Part::GeomPlane" and abs(g.CenterOfMass.z) < 1e-6)
+        k = dressup.SHELL
+        s = k.create(self.doc, self.body, None, dict(k.defaults(self.doc, self.body, None),
+                                                     faces="%s:Face%d" % (f.Name, bottom), thickness="1 mm"))
+        self.doc.recompute()
+        self.assertNotIn("Invalid", s.State, s.getStatusString())
+        self.assertTrue(s.Shape.isValid())
+        self.assertEqual(len(s.Shape.Solids), 1)
+        return s
+
+    def test_an_inscribed_disc_joins_exactly(self):
+        """The user's air2: the circle on the block's end face touching its top and bottom edges, 10 mm out."""
+        sk = self.on_face(lambda g: abs(g.CenterOfMass.x - 40) < 1e-6)
+        self.circle(sk, App.Vector(40, 15, 5), 5)
+        f = self.extrude(sk, operation="join", distance="10 mm")
+        self.assertEqual(f.TypeId, extrude.JOIN)
+        self.assertEqual(f.InCadExtrude, "sewn on the face")
+        self.sound(f.Shape, 12000 + math.pi * 25 * 10)
+        self.assertGreater(self.shell_on(f).Shape.Volume, 100)
+
+    def test_a_disc_inscribed_in_the_top_joins_and_cuts_soundly(self):
+        sk = self.on_face(lambda g: abs(g.CenterOfMass.z - 10) < 1e-6)
+        self.circle(sk, App.Vector(20, 15, 10), 15)  # touches both long sides of the top
+        f = self.extrude(sk, operation="join", distance="10 mm")
+        self.sound(f.Shape, 12000 + math.pi * 225 * 10)
+        f = extrude.update(self.doc, f, dict(extrude.read(self.doc, f), operation="cut", distance="5 mm"))
+        self.doc.recompute()  # the finder: a cut part-way into it was faulty, and the Shell after it
+        self.assertEqual(f.TypeId, extrude.CUT)
+        self.sound(f.Shape, 12000 - math.pi * 225 * 5)
+        s = self.shell_on(f)
+        s.Shape.check(True)
+
+    def test_a_join_against_a_taller_wall_and_a_symmetric_cut(self):
+        """A block with a step on half its top: a rectangle on the low half against the step's wall, joined higher
+        than the step, came out faulty (the tool's wall and the step's lay on one another, both kept), and the Shell
+        after it too. A disc inscribed in the top, cut Symmetric: exact, but Refine merged its round wall past the
+        lines where it touches the sides (faulty)."""
+        def rect(sk, x0, y0, x1, y1, z):
+            local = sk.getGlobalPlacement().inverse()
+            pts = [local.multVec(App.Vector(x, y, z)) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+            for i in range(4):
+                sk.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4]))
+            self.doc.recompute()
+        sk = self.on_face(lambda g: abs(g.CenterOfMass.z - 10) < 1e-6, "Step")
+        rect(sk, 20, 0, 40, 30, 10)
+        self.extrude(sk, operation="join", distance="10 mm")
+        sk = self.on_face(lambda g: abs(g.CenterOfMass.z - 10) < 1e-6 and g.BoundBox.ZMax < 10 + 1e-6, "Post")
+        rect(sk, 10, 10, 20, 20, 10)
+        f = self.extrude(sk, operation="join", distance="15 mm")
+        self.sound(f.Shape, 12000 + 6000 + 1500)
+        self.shell_on(f).Shape.check(True)
+        App.closeDocument(self.doc.Name)
+        self.setUp()
+        sk = self.on_face(lambda g: abs(g.CenterOfMass.z - 10) < 1e-6)
+        self.circle(sk, App.Vector(20, 15, 10), 15)
+        f = self.extrude(sk, operation="cut", distance="6 mm", direction="symmetric")
+        self.sound(f.Shape, 12000 - math.pi * 225 * 3)
+
+    def test_a_faulty_part_is_healed_for_a_symmetric_join_and_a_cut(self):
+        """The user's air2 (a STEP's arcs written as splines that stray off their faces): a disc inscribed in its
+        face, Join 5 and Cut 1 came out faulty and the Shell after them too, Join Symmetric 10 was refused. The part
+        is healed first; Symmetric drops its half inside the part and is sewn on the face."""
+        from incad.core import extrude_solid, heal
+        box = Part.makeBox(40, 30, 10)  # its top edge at y = 30 a spline sagging 0.5 µm, its tolerance as written
+        pts = [App.Vector(40 * k / 8.0, 30, 10 - 5e-4 * math.sin(math.pi * k / 8.0)) for k in range(9)]
+        spline = Part.BSplineCurve()
+        spline.interpolate(pts)
+        faces = []
+        for g in box.Faces:
+            hit = [e for e in g.Edges if abs(e.BoundBox.YMin - 30) < 1e-9 and abs(e.BoundBox.ZMin - 10) < 1e-9]
+            edges = [spline.toShape() if hit and e.isSame(hit[0]) else e for e in g.OuterWire.Edges]
+            faces.append(Part.Face(g.Surface, Part.Wire(Part.__sortEdges__(edges))) if hit else g.copy())
+        sewn = Part.Compound(faces)
+        sewn.sewShape(1e-3)
+        base = Part.Solid(sewn.Shells[0])
+        for e in base.Edges:
+            if type(e.Curve).__name__ == "BSplineCurve":
+                e.fixTolerance(1e-7, Part.Edge)
+        self.assertTrue(heal.faulty(base))
+        disc = [Part.Face(Part.Wire(Part.makeCircle(15, App.Vector(20, 15, 10))))]
+        up, down, at = App.Vector(0, 0, 1), App.Vector(0, 0, -1), App.Vector(20, 15, 10)
+        sym = extrude_solid.tool(disc, at, [(up, "length", 5.0, 0.0, base, None), (down, "length", 5.0, 0.0, base, None)])
+        shape, how = extrude_solid.combine(base, sym, "join", disc, at, up, True)
+        self.assertEqual(how, "sewn on the face")
+        self.sound(shape, 12000 + math.pi * 225 * 5)
+        shape, how = extrude_solid.combine(base, extrude_solid.prism(disc, down, 1.0), "cut", disc, at, down, True)
+        self.sound(shape, 12000 - math.pi * 225 * 1)
+
+    def test_a_plain_pad_and_pocket(self):
+        sk = self.on_face(lambda g: abs(g.CenterOfMass.z - 10) < 1e-6)
+        local = sk.getGlobalPlacement().inverse()
+        pts = [local.multVec(App.Vector(x, y, 10)) for x, y in ((5, 5), (15, 5), (15, 15), (5, 15))]
+        for i in range(4):
+            sk.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4]))
+        self.doc.recompute()
+        f = self.extrude(sk, operation="join", distance="5 mm")
+        self.sound(f.Shape, 12000 + 500)
+        g = extrude.update(self.doc, f, dict(extrude.read(self.doc, f), operation="cut"))
+        self.doc.recompute()  # (a Cut goes into the part unless flipped, as the add-on's Pocket always did)
+        self.sound(g.Shape, 12000 - 500)
+        self.assertEqual(extrude.read(self.doc, g)["direction"], "default")
+
+    def test_a_cut_tangent_to_a_side_is_exact_and_said(self):
+        """A circle tangent to the block's end, cut 5 deep, leaves a wall of no thickness there: the result is
+        exact and valid, and the user is told (the finder: kept without a word)."""
+        from incad.core import safe
+        sk = self.on_face(lambda g: abs(g.CenterOfMass.z - 10) < 1e-6)
+        self.circle(sk, App.Vector(35, 15, 10), 5)
+        f = self.extrude(sk, operation="cut", distance="5 mm")
+        self.assertTrue(f.Shape.isValid())
+        self.assertAlmostEqual(f.Shape.Volume, 12000 - math.pi * 25 * 5, delta=1e-6 * 12000)
+        try:
+            f.Shape.check(True)
+        except Exception:
+            self.assertIn("no thickness", safe.unsound(f))
+
+    def test_taper_as_freecad_makes_it(self):
+        """Above zero the outline grows along the extrusion (FreeCAD's Pad): a 40 x 30 profile 10 high at 5°."""
+        sk = self.on_face(lambda g: abs(g.CenterOfMass.z - 10) < 1e-6)
+        local = sk.getGlobalPlacement().inverse()
+        pts = [local.multVec(App.Vector(x, y, 10)) for x, y in ((10, 10), (30, 10), (30, 20), (10, 20))]
+        for i in range(4):
+            sk.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4]))
+        self.doc.recompute()
+        f = self.extrude(sk, operation="join", distance="10 mm", taper="5 °")
+        x = 10 * math.tan(math.radians(5))
+        frustum = 10 / 6 * (200 + 4 * (20 + x) * (10 + x) + (20 + 2 * x) * (10 + 2 * x))
+        self.sound(f.Shape, 12000 + frustum)
+
+    def test_to_next_onto_a_curved_face(self):
+        """To Next ends on the part's round face (a half cylinder lying on the block), not on its box."""
+        cyl = self.body.newObject("PartDesign::AdditiveCylinder", "Roof")
+        cyl.Radius, cyl.Height = 15, 40
+        cyl.Placement = App.Placement(App.Vector(0, 15, 10), App.Rotation(App.Vector(0, 1, 0), 90))
+        self.doc.recompute()
+        sk = util.add_rect_sketch(self.body, w=4, h=4, name="Under")
+        sk.AttachmentOffset = App.Placement(App.Vector(18, 13, 40), App.Rotation())
+        self.doc.recompute()
+        f = self.extrude(sk, operation="join", extent="to_next", direction="flip")
+        tool = f.AddSubShape
+        self.assertAlmostEqual(tool.BoundBox.ZMin, 10 + math.sqrt(15 ** 2 - 2 ** 2), places=4)
+        self.assertTrue(f.Shape.isValid())
+
+    def test_through_all_with_a_taper_and_two_sides(self):
+        sk = util.add_rect_sketch(self.body, w=10, h=10, name="Mid")
+        sk.AttachmentOffset = App.Placement(App.Vector(15, 10, 5), App.Rotation())
+        self.doc.recompute()
+        f = self.extrude(sk, operation="cut", extent="through_all", direction="symmetric", taper="-2 °")
+        self.assertTrue(f.Shape.isValid())
+        self.assertEqual(len(f.Shape.Solids), 1)
+        self.assertFalse(f.Shape.isInside(App.Vector(20, 15, 0.5), 1e-6, True), "through to the bottom")
+        self.assertFalse(f.Shape.isInside(App.Vector(20, 15, 9.5), 1e-6, True), "and the top")
+        g = extrude.update(self.doc, f, dict(extrude.read(self.doc, f), extent="distance", taper="0 °",
+                                             direction="two_sides", distance="3 mm", distance2="2 mm"))
+        self.doc.recompute()
+        self.sound(g.Shape, 12000 - 10 * 10 * 5)
+
+    def test_a_pattern_repeats_it(self):
+        sk = self.on_face(lambda g: abs(g.CenterOfMass.z - 10) < 1e-6)
+        self.circle(sk, App.Vector(5, 15, 10), 2)
+        f = self.extrude(sk, operation="cut", distance="4 mm")
+        pat = self.body.newObject("PartDesign::LinearPattern", "Row")
+        pat.Originals = [f]
+        pat.Direction = ([o for o in self.body.Origin.OriginFeatures if o.Role == "X_Axis"][0], [""])
+        pat.Length, pat.Occurrences = 20, 3
+        self.doc.recompute()
+        self.assertAlmostEqual(pat.Shape.Volume, 12000 - 3 * math.pi * 4 * 4, places=4)
+
+    def test_an_old_pad_stays_a_pad(self):
+        """A file made before: its Pad edits as a Pad, and a switch to Cut makes it FreeCAD's Pocket."""
+        old = util.add_pad(self.body, util.add_rect_sketch(self.body, w=4, h=4, name="Old"), 5, name="OldPad")
+        old.Placement = App.Placement()
+        self.doc.recompute()
+        g = extrude.update(self.doc, old, dict(extrude.read(self.doc, old), distance="6 mm"))
+        self.doc.recompute()
+        self.assertEqual(g.TypeId, "PartDesign::Pad")
+        g = extrude.update(self.doc, g, dict(extrude.read(self.doc, g), operation="cut", direction="flip"))
+        self.doc.recompute()  # (the sketch on the bottom: a Pocket goes up into the block when flipped)
+        self.assertEqual(g.TypeId, "PartDesign::Pocket")
+        self.assertAlmostEqual(g.Shape.Volume, 12000 - 4 * 4 * 6, places=4)

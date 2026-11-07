@@ -73,6 +73,37 @@ class DressUpTest(unittest.TestCase):
         else:
             self.assertIn("pick the edges again", r.error)
 
+    def test_a_fillet_on_a_pocket_rim_stays_when_the_pocket_gets_a_little_wider(self):
+        """A 6 x 4 pocket with r1 on its rim, made 6.4 wide: its moved side shifted 0.02 of the part, past what a
+        size change was let move an edge, and the change was refused. The edge on the same two faces is found."""
+        import Part
+        from incad.core import safe
+        sk = self.body.newObject("Sketcher::SketchObject", "PS")
+        sk.AttachmentSupport = [(self.pad, "Face%d" % self.top_face)]
+        sk.MapMode = "FlatFace"
+
+        def rect(w):
+            p = [App.Vector(3, 3, 0), App.Vector(3 + w, 3, 0), App.Vector(3 + w, 7, 0), App.Vector(3, 7, 0)]
+            sk.Geometry = [Part.LineSegment(p[i], p[(i + 1) % 4]) for i in range(4)]
+        rect(6)
+        pocket = self.body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile, pocket.Length = sk, 5
+        self.body.Tip = pocket
+        self.doc.recompute()
+        rim = ["Edge%d" % (i + 1) for i, e in enumerate(pocket.Shape.Edges)
+               if abs(e.CenterOfMass.z - 10) < 1e-6 and 3 - 1e-6 <= e.CenterOfMass.x <= 9 + 1e-6
+               and 3 - 1e-6 <= e.CenterOfMass.y <= 7 + 1e-6]
+        self.assertEqual(len(rim), 4)
+        k = dressup.FILLET
+        f = k.create(self.doc, self.body, None, dict(k.defaults(self.doc, self.body, None), radius="1 mm",
+                                                     edges=common.format_picks([(pocket, e) for e in rim])))
+        self.doc.recompute()
+        r = safe.run_safely("Sketch", lambda: rect(6.4), self.doc)
+        self.assertTrue(r.ok, r.error)
+        found = sorted((round(c.x, 3), round(c.y, 3)) for c in
+                       (pocket.Shape.getElement(e).CenterOfMass for e in f.Base[1]))
+        self.assertEqual(found, [(3.0, 5.0), (6.2, 3.0), (6.2, 7.0), (9.4, 5.0)])  # the new rim, all four
+
     def test_chamfer_types(self):
         k = dressup.CHAMFER
         for kind, volume in (("equal", 1971.33), ("two", 1945.33), ("angle", 1983.12)):
@@ -150,7 +181,7 @@ class ShellBeforeThreadTest(unittest.TestCase):
         r = safe.run_safely("Shell", lambda: dressup.shell_before_thread(self.doc, body, self._values(body, "1.5 mm"),
                                                                          search=False), self.doc)
         self.assertFalse(r.ok)
-        self.assertIn("Thread then fails on the hollowed part", r.error)
+        self.assertIn("then fails on the hollowed part", r.error)  # (Thread, or the Revolve before it: the sharp wall)
         self.assertEqual(self.doc.UndoCount, n0, "rolled back: no step")
         self.assertFalse(any(o.TypeId in dressup.SHELL.TYPES and dressup.SHELL.claims(o) for o in body.Group))
         self.assertIs(body.Tip, tip)

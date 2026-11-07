@@ -54,8 +54,7 @@ def test_2_look_at_faces_the_sketch_while_sketching():
     harness.pump(1500)
     d = view.getViewDirection()
     assert abs(abs(d.y) - 1) < 1e-3, d  # looking along the XZ plane's normal
-    assert "view.look_at" in marking_layout.LAYOUT["sketch"].values() or \
-        "view.look_at" in marking_layout.LAYOUT["sketch"]["list"]
+    # (no longer in the sketch's marking menu: the user cut it to what applies under the cursor; the view strip has it)
 
 
 def test_3_double_click_a_plane_in_the_browser_starts_a_sketch():

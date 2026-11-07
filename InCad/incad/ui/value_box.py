@@ -79,15 +79,36 @@ class ValueBox(QtWidgets.QFrame):
         self.adjustSize()
 
     def show_near(self, global_pos):
+        self.ensurePolished()  # its style's sizes first: a box sized before them grew past the edge once shown
         self.adjustSize()
         parent = self.parentWidget()
-        pos = parent.mapFromGlobal(global_pos + QtCore.QPoint(16, 16)) if parent is not None else global_pos
-        if parent is not None:  # stay inside the view
-            pos.setX(max(0, min(pos.x(), parent.width() - self.width())))
-            pos.setY(max(0, min(pos.y(), parent.height() - self.height())))
-        self.move(pos)
+        self.move(parent.mapFromGlobal(global_pos + QtCore.QPoint(16, 16)) if parent is not None else global_pos)
+        self._keep_inside()
         self.show()
         self.take_keyboard()
+        QtCore.QTimer.singleShot(0, self._keep_inside)  # once more with the size it was shown at (a scaled screen)
+
+    def _keep_inside(self):
+        """Inside the view and on the screen's free area: on Windows a box at the view's bottom edge went under the
+        taskbar (the window reached below it) and could not be got out of the corner (the user)."""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        try:
+            self.adjustSize()
+            area = QtCore.QRect(0, 0, parent.width(), parent.height())
+            screen = parent.screen()
+            if screen is not None:
+                free = screen.availableGeometry()
+                area = area.intersected(QtCore.QRect(parent.mapFromGlobal(free.topLeft()), free.size()))
+            if area.width() <= 0 or area.height() <= 0:
+                return
+            pos = self.pos()
+            pos.setX(max(area.left(), min(pos.x(), area.right() + 1 - self.width())))
+            pos.setY(max(area.top(), min(pos.y(), area.bottom() + 1 - self.height())))
+            self.move(pos)
+        except RuntimeError:  # closed meanwhile
+            pass
 
     def take_keyboard(self):
         try:

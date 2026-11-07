@@ -1,5 +1,6 @@
-"""Unused open sketches stay visible in the part view with their key points marked (spline poles, segment ends,
-circle centres); the markers follow the user's Hide / Show, sketch edit mode, deletion, and the real part."""
+"""Unused open sketches stay visible in the part view, with NO key points drawn there (the user's law: points are
+for the building commands, whose dialogs mark them); visibility follows the user's Hide / Show, sketch edit mode,
+deletion, and the real part. The Sweep / Loft dialogs still mark the picked sketches' points."""
 import os
 import sys
 
@@ -59,7 +60,7 @@ def test_0_part_with_a_path():
     shell.instance().schedule_refresh()
     harness.pump(600)
     assert sk.Visibility, "an open contour stays visible"
-    assert _count() == 4, _count()  # (0,0), (30,0) shared, (40,10), (50,0)
+    assert _count() == 0, _count()  # no points in the plain view
 
 
 def test_1_hidden_path_has_no_markers():
@@ -68,11 +69,13 @@ def test_1_hidden_path_has_no_markers():
     document.set_visibility([sk], False)
     shell.instance().schedule_refresh()
     harness.pump(500)
+    assert not sk.Visibility
     assert _count() == 0, _count()
     document.set_visibility([sk], True)
     shell.instance().schedule_refresh()
     harness.pump(500)
-    assert _count() == 4, _count()
+    assert sk.Visibility
+    assert _count() == 0, _count()
 
 
 def test_2_sketch_edit_mode_hides_the_markers():
@@ -85,7 +88,8 @@ def test_2_sketch_edit_mode_hides_the_markers():
     commands.REGISTRY.run("sketch.finish")
     harness.pump(800)
     assert sh.sketches.editing() is None
-    assert _count() == 4, _count()
+    assert App.ActiveDocument.getObject("Path").Visibility, "the open path stays shown after editing"
+    assert _count() == 0, _count()
 
 
 def test_3_deleted_sketch_drops_its_markers():
@@ -105,7 +109,7 @@ def test_4_real_part_sketch7_is_shown_with_its_ends():
     harness.pump(800)
     sk = App.ActiveDocument.getObject("Sketch006")
     assert sk.Visibility, "Sketch7 (two open chains) is shown"
-    assert _count() >= 4, _count()
+    assert _count() == 0, _count()  # shown, but no points in the plain view
     others = [o.Name for o in App.ActiveDocument.Objects if o.TypeId == "Sketcher::SketchObject" and o.Visibility
               and o is not sk]
     assert others == [], others
@@ -141,7 +145,8 @@ def test_5_sweep_dialog_marks_the_picked_path_and_profile():
     assert sh.feature_session is None
     assert fs._markers is None, "the dialog's markers are gone"
     assert not prof.Visibility, "the closed sketch is hidden again"
-    assert _count() == 2, _count()  # the open path's ends are back
+    assert path.Visibility, "the open path stays shown"
+    assert _count() == 0, _count()  # no points in the plain view
 
 
 def test_6_loft_dialog_marks_every_section():
@@ -216,8 +221,7 @@ def test_8_ok_on_a_sweep_hides_the_path_and_its_markers():
     sh = shell.instance()
     path = App.ActiveDocument.getObject("Path")
     assert path.Visibility
-    before = _count()  # the path's two ends, plus the centre of Top (unused, left visible by the cancelled Loft)
-    assert before >= 2, before
+    assert _count() == 0, _count()  # no points in the plain view
     commands.REGISTRY.run("feature.sweep")
     harness.pump(600)
     fs = sh.feature_session
@@ -230,13 +234,13 @@ def test_8_ok_on_a_sweep_hides_the_path_and_its_markers():
     sweeps = [o for o in App.ActiveDocument.Objects if o.TypeId == "PartDesign::AdditivePipe"]
     assert sweeps and "Invalid" not in sweeps[0].State, [o.State for o in sweeps]
     assert not path.Visibility, "the Sweep consumed its path"
-    assert _count() == before - 2, (_count(), before)
+    assert _count() == 0, _count()
     assert sh.browser.item_by_label("Path") is None or \
         sh.browser.item_by_label("Path").data(0, STATE_ROLE) != "hidden", "a consumed sketch is not 'hidden by choice'"
     commands.REGISTRY.run("edit.undo")
     harness.pump(900)
     assert not [o for o in App.ActiveDocument.Objects if o.TypeId == "PartDesign::AdditivePipe"]
-    assert path.Visibility and _count() == before, (path.Visibility, _count(), before)
+    assert path.Visibility and _count() == 0, (path.Visibility, _count())
 
 
 def test_9_right_click_on_a_shown_sketch_in_the_view_opens_the_browser_menu():

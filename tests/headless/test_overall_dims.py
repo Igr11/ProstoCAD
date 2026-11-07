@@ -42,6 +42,37 @@ class OverallDimsTest(unittest.TestCase):
         self.assertAlmostEqual(self.sk.Constraints[i].Value, 28, places=6)
         self.assertEqual(overall_dims.kind_of(self.sk, i), ("overall", ext, own))
 
+    def test_projected_holes_keep_their_outer_sides_when_the_part_changes(self):
+        """A block with two holes, a sketch on its top projecting both hole edges, the overall size over them. The
+        holes moved apart and made smaller: it still measures the outer sides (it jumped to the inner ones)."""
+        box = self.doc.addObject("Part::Box", "Box")
+        box.Length, box.Width, box.Height = 80, 30, 10
+        holes = [self.doc.addObject("Part::Cylinder", "H%d" % k) for k in (1, 2)]
+        for h, x in zip(holes, (15, 65)):
+            h.Radius, h.Height, h.Placement.Base = 4, 20, V(x, 15, -5)
+        tool = self.doc.addObject("Part::MultiFuse", "Holes")
+        tool.Shapes = holes
+        cut = self.doc.addObject("Part::Cut", "Cut")
+        cut.Base, cut.Tool = box, tool
+        self.doc.recompute()
+        top = next("Face%d" % (k + 1) for k, f in enumerate(cut.Shape.Faces) if abs(f.CenterOfMass.z - 10) < 1e-6)
+        sk = self.doc.addObject("Sketcher::SketchObject", "OnTop")
+        sk.AttachmentSupport, sk.MapMode = [(cut, top)], "FlatFace"
+        for k, e in enumerate(cut.Shape.Edges):
+            if e.Curve.TypeId == "Part::GeomCircle" and abs(e.Vertexes[0].Point.z - 10) < 1e-6:
+                sk.addExternal("Cut", "Edge%d" % (k + 1))
+        self.doc.recompute()
+        i = overall_dims.overall(sk, -3, -4)
+        self.assertAlmostEqual(sk.Constraints[i].Value, 58.0, places=6)
+        for h, x in zip(holes, (8, 72)):
+            h.Radius, h.Placement.Base = 3, V(x, 15, -5)
+        self.doc.recompute()
+        self.assertAlmostEqual(sk.Constraints[i].Value, 70.0, places=6)  # 64 between centres + 2 x 3
+        self.assertEqual(overall_dims.kind_of(sk, i)[0], "overall")
+        j = overall_dims.set_kind(sk, i, "centers")
+        self.assertAlmostEqual(sk.Constraints[j].Value, 64.0, places=6)
+        self.assertEqual(sk.GeometryCount, 0)  # the overall's construction went with it
+
     def slot(self):
         c1, c2, r = slots.overall(V(0, 0, 0), V(40, 0, 0), V(20, 5, 0))  # 40 long, 10 wide
         return slots.add(self.sk, c1, c2, r)

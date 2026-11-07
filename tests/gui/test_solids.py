@@ -78,7 +78,7 @@ def test_1_a_sketch_on_the_box_and_a_cut_through_it():
     pocket = other.Tip
     where = [(o.Label, o.TypeId, o.getParentGeoFeatureGroup().Label if o.getParentGeoFeatureGroup() else None)
              for o in App.ActiveDocument.Objects if o.isDerivedFrom("PartDesign::Feature")]
-    assert pocket.TypeId == "PartDesign::Pocket" and pocket.getParentGeoFeatureGroup() is other, (pocket.Label, where)
+    assert pocket.TypeId == "PartDesign::FeatureSubtractivePython" and pocket.getParentGeoFeatureGroup() is other, (pocket.Label, where)
     import math
     assert abs(pocket.Shape.Volume - (2000 - math.pi * 4 * 10)) < 2.0, pocket.Shape.Volume
     assert abs(_body().Tip.Shape.Volume - 2000) < 1e-6, "the part is untouched"
@@ -152,7 +152,7 @@ def test_3_a_sketch_left_in_an_empty_solid_cuts_the_box_its_face_belongs_to():
     harness.pump(900)
     assert sh.feature_session is None
     cut = other.Tip
-    assert cut.TypeId == "PartDesign::Pocket" and cut.Profile[0] is sk, cut.Label
+    assert cut.TypeId == "PartDesign::FeatureSubtractivePython" and cut.Profile[0] is sk, cut.Label
     assert cut.Shape.Volume < volume - 1, (cut.Shape.Volume, volume)
     assert sk.getParentGeoFeatureGroup() is other, "the sketch moved to the box's Solid"
     assert App.ActiveDocument.getObject(stray_name) is None, "the emptied Solid is gone"

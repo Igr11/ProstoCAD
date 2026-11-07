@@ -83,6 +83,8 @@ def keyboard():
 
 def test_0_setup():
     prefs.set_remember_new_choice(True)
+    # a dimension the sketch fixes already asks (a modal question): answered here, and none expected in this file
+    shell.REFERENCE_ASK = lambda text: ST.setdefault("asked", []).append(text) or True
     Gui.activateWorkbench("InCadWorkbench")
     harness.pump(1000)
     commands.REGISTRY.run("file.new")
@@ -259,9 +261,11 @@ def test_8_enter_before_placing_keeps_name_and_value():
 def test_9_box_closes_when_its_dimension_is_cancelled():
     sk = doc().getObject(ST["a"])
     rmb_edit(ST["a"])
-    sk.addConstraint(Sketcher.Constraint("DistanceY", 3, 2, 3, 1, 10))
+    # a dimension the sketch leaves free (line 3's height is 12 since test 6: a second one would fight it and ask)
+    sk.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, 0, 1, 5))
     doc().recompute()
     harness.pump(600)
+    assert not ST.get("asked"), ST.get("asked")
     name = box().name
     index = [i for i, c in enumerate(sk.Constraints) if c.Name == name][0]
     sk.delConstraint(index)  # Esc in the view cancelled the tool: the dimension is gone, nothing replaces it

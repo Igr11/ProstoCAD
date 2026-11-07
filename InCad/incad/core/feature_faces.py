@@ -61,7 +61,7 @@ def _point(el, kind):
 
 
 def _on(point, el):
-    bb = el.BoundBox
+    bb = _box(el)
     bb.enlarge(TOL * 10)
     if not bb.isInside(point):
         return False
@@ -77,11 +77,21 @@ def _cached(store, shape, kind, make):
     return store[key]
 
 
+def _box(el):
+    """The element's exact box: BoundBox follows the display's triangles once the shape is drawn, and those cut
+    inside a curve (an ellipse's side face ended 0.0002 mm short of its end: the point there lay "on no face", and a
+    fillet's preview outlined the whole side face)."""
+    try:
+        return el.optimalBoundingBox(False, False)
+    except Exception:
+        return el.BoundBox
+
+
 def _boxes(shape, kind):
     def make():
         out = []
         for o in _elements(shape, kind):
-            bb = o.BoundBox
+            bb = _box(o)
             bb.enlarge(TOL * 10)
             out.append((bb, o))
         return out

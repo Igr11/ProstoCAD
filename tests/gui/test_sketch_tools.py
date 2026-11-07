@@ -20,6 +20,8 @@ def method():
 
 def test_0_sketch():
     prefs.set_remember_new_choice(True)
+    # a dimension the sketch fixes already asks (a modal question that would wait forever here): keep it as a reference
+    shell.REFERENCE_ASK = lambda text: True
     Gui.activateWorkbench("InCadWorkbench")
     harness.pump(1000)
     commands.REGISTRY.run("file.new")
@@ -319,6 +321,7 @@ def test_10_delete_removes_selected_dimension_and_feature():
     i = sk.addConstraint(Sketcher.Constraint("DistanceX", 0, 1, 0, 2, 20))
     App.ActiveDocument.recompute()
     harness.pump(400)
+    assert i < len(sk.Constraints) and sk.Constraints[i].Type == "DistanceX"  # kept (as a reference if it repeats)
     n = len(sk.Constraints)
     Gui.Selection.clearSelection()
     Gui.Selection.addSelection(App.ActiveDocument.Name, sk.Name, "Constraint%d" % (i + 1))

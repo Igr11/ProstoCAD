@@ -88,7 +88,7 @@ def test_0_block_and_slot_cut():
     dialog().field("operation").button("cut").click()
     harness.pump(600)
     ok()
-    assert body().Tip.TypeId == "PartDesign::Pocket" and body().Shape.Volume < ST["v_block"] - 1
+    assert body().Tip.TypeId == "PartDesign::FeatureSubtractivePython" and body().Shape.Volume < ST["v_block"] - 1
 
 
 def test_1_edit_a_sketch_from_the_tree_menu():

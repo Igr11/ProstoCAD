@@ -1,8 +1,13 @@
 """Overall dimensions (the user, 2026-10-17): a distance between the OUTER edges of two arcs or circles — a slot's
 overall length, end to end over its arcs — set by hand like any dimension (FreeCAD's own Dimension gives the
 centre-to-centre one). A construction axis through the two centres, a point where it leaves each arc, and the
-distance between those points. It drives (a normal dN) when the sketch takes it; when the length is already fixed
+distance between those points. Each point hangs on a construction radius at a fixed angle to the axis (180° at the
+first arc, 0° at the second), so it stays on the outer side: a point only on the axis and the arc has two places,
+and the solver kept the nearer one — after the part changed (projected holes moved apart) it jumped to the inner
+side and the overall length became the gap. It drives (a normal dN) when the sketch takes it; when the length is already fixed
 (a centre-to-centre dimension, say) it is added as a reference, which follows. No GUI: ui/overall_dim_tool picks."""
+import math
+
 import FreeCAD as App
 import Part
 import Sketcher
@@ -91,15 +96,19 @@ def overall(sk, a, b):
         raise ValueError("These two are concentric: dimension their diameters instead")
     length = u.Length + r1 + r2
     u.normalize()
-    shapes = [Part.LineSegment(c1, c2), Part.Point(c1 - u * r1), Part.Point(c2 + u * r2)]
+    e1, e2 = c1 - u * r1, c2 + u * r2
+    shapes = [Part.LineSegment(c1, c2), Part.Point(e1), Part.Point(e2), Part.LineSegment(c1, e1),
+              Part.LineSegment(c2, e2)]
 
     def constraints(ids):
-        axis, p1, p2 = ids
+        axis, p1, p2, s1, s2 = ids
         return [Sketcher.Constraint("Coincident", axis, 1, a, 3), Sketcher.Constraint("Coincident", axis, 2, b, 3),
-                Sketcher.Constraint("PointOnObject", p1, 1, axis), Sketcher.Constraint("PointOnObject", p1, 1, a),
-                Sketcher.Constraint("PointOnObject", p2, 1, axis), Sketcher.Constraint("PointOnObject", p2, 1, b),
+                Sketcher.Constraint("Coincident", s1, 1, a, 3), Sketcher.Constraint("Coincident", s1, 2, p1, 1),
+                Sketcher.Constraint("Angle", axis, s1, math.pi), Sketcher.Constraint("PointOnObject", p1, 1, a),
+                Sketcher.Constraint("Coincident", s2, 1, b, 3), Sketcher.Constraint("Coincident", s2, 2, p2, 1),
+                Sketcher.Constraint("Angle", axis, s2, 0.0), Sketcher.Constraint("PointOnObject", p2, 1, b),
                 Sketcher.Constraint("Distance", p1, 1, p2, 1, length)]
-    if _try(sk, shapes, constraints, 1) or _try(sk, shapes, constraints, 0, reference=(6,)):
+    if _try(sk, shapes, constraints, 1) or _try(sk, shapes, constraints, 0, reference=(10,)):
         return sk.ConstraintCount - 1
     raise ValueError("This dimension doesn't fit the sketch")
 
@@ -198,8 +207,8 @@ def set_kind(sk, index, kind):
         raise ValueError("These two overlap: there is no gap to dimension")
     if old == "overall":
         p1, p2 = c.First, c.Second
-        axis = (set(_point_on(sk, p1)) & set(_point_on(sk, p2))).pop()
-        for g in sorted((axis, p1, p2), reverse=True):  # its own construction (made after a and b: they keep ids)
+        own = _construction(sk, p1, p2)
+        for g in sorted(own, reverse=True):  # its own construction (made after a and b: they keep ids)
             sk.delGeometry(g)
     else:
         sk.delConstraint(index)
@@ -218,6 +227,21 @@ def set_kind(sk, index, kind):
 
 
 def _point_on(sk, point):
-    """The construction lines a point lies on (PointOnObject)."""
-    return [k.Second for k in sk.Constraints if k.Type == "PointOnObject" and k.First == point and k.Second >= 0
-            and sk.Geometry[k.Second].TypeId == _LINE]
+    """The construction lines a point lies on (PointOnObject) or ends at (Coincident)."""
+    out = []
+    for k in sk.Constraints:
+        if k.Type == "PointOnObject" and k.First == point:
+            out.append(k.Second)
+        elif k.Type == "Coincident" and point in (k.First, k.Second):
+            out.append(k.Second if k.First == point else k.First)
+    return [g for g in out if g >= 0 and sk.Geometry[g].TypeId == _LINE]
+
+
+def _construction(sk, p1, p2):
+    """The geometry an overall dimension made: its two points, the axis and, since the side fix, the radius from
+    each centre to its point (tied to the axis by an angle). Older ones: the points on one axis."""
+    near = set(_point_on(sk, p1)) | set(_point_on(sk, p2))
+    tied = {k.First if k.Second in near else k.Second for k in sk.Constraints
+            if k.Type == "Angle" and (k.First in near) != (k.Second in near) and min(k.First, k.Second) >= 0}
+    lines = (set(_point_on(sk, p1)) & set(_point_on(sk, p2))) or (near | tied)
+    return lines | {p1, p2}

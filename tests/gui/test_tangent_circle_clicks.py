@@ -62,4 +62,29 @@ def test_0_three_clicks_make_the_circle():
     assert shell.instance().slot_tool is None, "the tool ends with the circle"
 
 
-harness.run([test_0_three_clicks_make_the_circle])
+def test_1_two_lines_and_a_click_away():
+    """Two lines clicked, the circle shown following the pointer, then a click away from them places it touching the
+    two (the user: "two lines or three")."""
+    sk = sketch()
+    before = len(sk.Geometry)
+    a = sk.addGeometry(Part.LineSegment(V(60, 0, 0), V(100, 0, 0)))
+    b = sk.addGeometry(Part.LineSegment(V(60, 0, 0), V(60, 40, 0)))
+    sk.recompute()
+    harness.pump(300)
+    res = commands.REGISTRY.run("sketch.circle_tangent")
+    assert res.ok, res.error
+    harness.pump(300)
+    click(sk, 80, 0)
+    tool = shell.instance().slot_tool
+    assert tool is not None and tool._ghost is not None, "the circle shows from the first click"
+    click(sk, 60, 20)
+    click(sk, 70, 10)  # away from both: the circle touching the two, radius about 10
+    circles = [g for g in sk.Geometry[before:] if g.TypeId == "Part::GeomCircle"]
+    assert len(circles) == 1, [g.TypeId for g in sk.Geometry]
+    c = circles[0]
+    assert abs(c.Center.x - 60 - c.Radius) < 1e-4 and abs(c.Center.y - c.Radius) < 1e-4, (c.Center, c.Radius)
+    assert 7 < c.Radius < 13, c.Radius
+    assert shell.instance().slot_tool is None
+
+
+harness.run([test_0_three_clicks_make_the_circle, test_1_two_lines_and_a_click_away])

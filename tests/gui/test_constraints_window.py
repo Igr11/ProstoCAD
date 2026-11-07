@@ -36,7 +36,10 @@ def test_0_sketch_with_a_rectangle():
     harness.pump(1200)
     rect(sk())
     App.ActiveDocument.recompute()
-    harness.pump(500)
+    harness.pump(1000)
+    # a new rectangle gets its construction centre point, Symmetric between two corners (the user: one-constraint
+    # symmetry): 10 constraints of the rectangle + that one
+    assert sk().GeometryCount == 5 and sk().Constraints[-1].Type == "Symmetric", [c.Type for c in sk().Constraints]
 
 
 def test_1_ribbon_opens_the_window_with_every_constraint():
@@ -46,7 +49,7 @@ def test_1_ribbon_opens_the_window_with_every_constraint():
     harness.pump(500)
     assert panel() is not None and panel().isVisible()
     assert panel().title_text() == "Constraints — %s" % sk().Label, panel().title_text()
-    assert len(panel().row_texts()) == len(sk().Constraints) == 10
+    assert len(panel().row_texts()) == len(sk().Constraints) == 11, (panel().row_texts(), [c.Type for c in sk().Constraints], sk().GeometryCount)
 
 
 def test_2_picking_a_line_filters_and_a_row_highlights():
@@ -54,7 +57,8 @@ def test_2_picking_a_line_filters_and_a_row_highlights():
     Gui.Selection.addSelection(App.ActiveDocument.Name, sk().Name, "Edge1")
     harness.pump(500)
     assert panel().header_text().startswith("Picked: Line 1"), panel().header_text()
-    assert [t for t, _, _ in panel().row_texts()] == ["Coincident", "Coincident", "Horizontal", "Horizontal Distance"]
+    assert [t for t, _, _ in panel().row_texts()] == ["Coincident", "Coincident", "Horizontal", "Horizontal Distance",
+                                                    "Symmetric"], panel().row_texts()
     panel().select_index(4)
     harness.pump(300)
     subs = Gui.Selection.getSelectionEx(App.ActiveDocument.Name)[0].SubElementNames
@@ -67,7 +71,7 @@ def test_3_delete_from_the_window_is_one_undo_step():
     panel().set_checked(4, True)
     panel().delete_button.click()
     harness.pump(600)
-    assert len(sk().Constraints) == 9
+    assert len(sk().Constraints) == 10, [c.Type for c in sk().Constraints]
     assert doc.UndoNames[0] == "Delete Constraints" and len(doc.UndoNames) == before + 1, doc.UndoNames
     assert ("Horizontal", "Line 1", "") not in panel().row_texts()
 

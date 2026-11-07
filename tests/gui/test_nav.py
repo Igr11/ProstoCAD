@@ -64,9 +64,13 @@ def nav_params():
 def test_0_setup():
     prefs.set_remember_new_choice(True)
     prefs.set_default_units("mm")
-    App.ParamGet(theme.VIEW_GROUP).SetString("NavigationStyle", "Gui::BlenderNavigationStyle")  # the user's own
+    # ProstoCAD starts in InCad: leave it first, so the user's own style is set in FreeCAD (set while InCad is on, the
+    # restore on leaving put back the style from before)
     Gui.activateWorkbench("PartDesignWorkbench")
     harness.pump(800)
+    App.ParamGet(theme.VIEW_GROUP).SetString("NavigationStyle", "Gui::BlenderNavigationStyle")  # the user's own
+    harness.pump(300)
+    assert Gui.ActiveDocument is None or view().getNavigationType() == "Gui::BlenderNavigationStyle"
     BASE["params"] = nav_params()
     Gui.activateWorkbench("InCadWorkbench")
     harness.pump(1000)

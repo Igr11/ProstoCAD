@@ -112,7 +112,7 @@ class ExtrudeTo(unittest.TestCase):
         f = self.make(self.face(self.box, lambda fc: fc.normalAt(0, 0).z < -0.5))
         g = extrude.update(self.doc, f, dict(extrude.read(self.doc, f), operation="cut")) or f
         self.doc.recompute()
-        g = [o for o in self.body.Group if o.TypeId == "PartDesign::Pocket"][0]
+        g = [o for o in self.body.Group if o.TypeId == extrude.CUT][0]
         self.assertEqual([h.TypeId for h in self.helpers(g)], ["PartDesign::SubShapeBinder"])
         self.assertEqual(extrude.read(self.doc, g)["to_face"][:len(self.box.Name)], self.box.Name)
 

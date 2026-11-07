@@ -114,7 +114,7 @@ def test_3_join_to_a_face_of_the_part_joins_it():
     Gui.Selection.addSelection(doc().Name, ST["sk"].Name)
     commands.REGISTRY.run("feature.extrude")
     harness.pump(1000)
-    pad = [o for o in ST["body"].Group if o.TypeId == "PartDesign::Pad"][0]
+    pad = [o for o in ST["body"].Group if o.TypeId == "PartDesign::FeatureAdditivePython"][0]
     top = [i + 1 for i, f in enumerate(pad.Shape.Faces) if abs(f.CenterOfMass.z - 5) < 1e-6
            and f.Surface.TypeId == "Part::GeomPlane"][0]
     d = dialog()
@@ -146,7 +146,7 @@ def test_4_join_to_cut_and_cancel_leave_the_part_alone():
     back; the abort took its value out of the model's values, and FreeCAD then recomputed every feature using any
     value: on a part with a modeled thread 6 s. The part's features that use a value are not computed again."""
     from incad.core import model
-    pad = [o for o in ST["body"].Group if o.TypeId == "PartDesign::Pad"][0]
+    pad = [o for o in ST["body"].Group if o.TypeId == "PartDesign::FeatureAdditivePython"][0]
     name = model.new_feature_parameter(doc(), "5 mm")
     pad.setExpression("Length", "InCadModel.%s" % name)
     doc().recompute()

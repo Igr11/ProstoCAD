@@ -52,11 +52,11 @@ class HoleTest(unittest.TestCase):
         self.pad.Length = 20
         sk.AttachmentOffset = App.Placement(App.Vector(0, 0, 20), App.Rotation())
         self.doc.recompute()
-        self.assertEqual(hole.follow(self.doc), [f.Label])
+        self.assertEqual(hole.follow_part(self.doc), [f.Label])
         self.doc.recompute()
         self.assertAlmostEqual(f.Depth.Value, 20, places=6)
         self.assertAlmostEqual(self.body.Shape.Volume, 4000 - math.pi * 4 * 20, places=2)
-        self.assertEqual(hole.follow(self.doc), [], "in step now: nothing more to do")
+        self.assertEqual(hole.follow_part(self.doc), [], "in step now: nothing more to do")
 
     def test_counterbore(self):
         sk = self.sketch_with_circle()
@@ -107,7 +107,7 @@ class HoleTest(unittest.TestCase):
         sk.delGeometries([0])
         sk.addGeometry(Part.Circle(App.Vector(6, 5, 0), App.Vector(0, 0, 1), 3))
         self.doc.recompute()
-        self.assertEqual(hole.follow(self.doc), [f.Label])
+        self.assertEqual(hole.follow_part(self.doc), [f.Label])
         self.doc.recompute()
         prof = f.Profile[0] if isinstance(f.Profile, (tuple, list)) else f.Profile
         centre = prof.getGlobalPlacement().multVec(App.Vector(prof.Geometry[0].X, prof.Geometry[0].Y, 0))

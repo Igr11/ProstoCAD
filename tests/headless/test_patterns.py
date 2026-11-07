@@ -2,7 +2,7 @@ import unittest
 
 import FreeCAD as App
 from incad.core import document, model
-from incad.features import common, kind_for, patterns
+from incad.features import common, kind_for, own_pattern, patterns
 from headless import util
 
 
@@ -48,6 +48,21 @@ class PatternsTest(unittest.TestCase):
                                                      count="5"))
         self.doc.recompute()  # as the dialog does after create
         self.assertEqual(f.Occurrences, 5)
+
+    def test_count_one_is_kept_and_spacing_zero_is_said_plainly(self):
+        """Count 1 passed the count check, then was refused as "the pattern changes nothing": a pattern of one is the
+        original alone (a count parameter set to 1). Spacing 0 gave FreeCAD's "Pattern length too small"."""
+        from incad.core import safe
+        k = patterns.RECT
+        r = safe.run_safely("Pattern", lambda: k.create(self.doc, self.body, None, dict(
+            k.defaults(self.doc, self.body, None), features=self.pad_pick, count1="1", spacing1="30 mm")), self.doc)
+        self.assertTrue(r.ok, r.error)
+        self.assertAlmostEqual(r.value.Shape.Volume, 2000, places=3)
+        r = safe.run_safely("Pattern", lambda: k.update(self.doc, r.value, dict(
+            k.read(self.doc, r.value), count1="3", spacing1="0 mm")), self.doc)
+        self.assertFalse(r.ok)
+        self.assertIn("spacing must be more than 0", r.error)
+        self.assertNotIn("Pattern length", r.error)
 
     def test_a_face_or_edge_clicked_in_3d_stands_for_the_feature_that_made_it(self):
         """Pattern's Features field takes a feature from the tree, or any face/edge of it clicked in the view: the
@@ -408,6 +423,63 @@ class PatternsTest(unittest.TestCase):
         self.assertAlmostEqual(f.Shape.Volume, 4000, places=1)
         self.assertEqual(common.parse_picks(self.doc, k.read(self.doc, f)["features"]), [(self.pad, "")])
 
+    def test_copies_touching_along_a_line_make_one_sound_solid(self):
+        """Discs r10 spaced 20 (each copy touches the next along a line, every disc touches the block's long edges)
+        and a disc tangent to the mirror plane: the kernel called both valid with the right volume, the full check
+        faulty (faces crossing themselves). Our own pattern and the Mirror Solid join are made sound (faces split to
+        meet, as Extrude does): one solid, the exact volume, nothing to say (spacing 25: copies apart)."""
+        import math
+        import Part
+        import Sketcher
+        from incad.core import safe
+        from incad.features import extrude, solid_mirror
+
+        def block(w):
+            doc = util.new_doc("Tg")
+            body = document.make_part(doc)
+            sk = util.add_rect_sketch(body, w, 20)
+            f = extrude.create(doc, body, sk, dict(extrude.defaults(doc, body, sk), distance="10 mm"))
+            doc.recompute()
+            top = [i + 1 for i, g in enumerate(f.Shape.Faces) if abs(g.CenterOfMass.z - 10) < 1e-6][0]
+            ds = body.newObject("Sketcher::SketchObject", "Disc")
+            ds.AttachmentSupport = [(f, "Face%d" % top)]
+            ds.MapMode = "FlatFace"
+            ds.addGeometry(Part.Circle(App.Vector(10, 10, 0), App.Vector(0, 0, 1), 10))
+            doc.recompute()
+            disc = extrude.create(doc, body, ds, dict(extrude.defaults(doc, body, ds), distance="5 mm"))
+            doc.recompute()
+            return doc, body, disc
+
+        def faulty(shape):
+            try:
+                shape.check(True)
+                return False
+            except Exception:
+                return True
+
+        x = lambda body: [o for o in body.Origin.OriginFeatures if o.Role == "X_Axis"][0]
+        for spacing, said in (("20 mm", False), ("25 mm", False)):
+            doc, body, disc = block(70)
+            k = patterns.RECT
+            f = k.create(doc, body, None, dict(k.defaults(doc, body, None), features=common.format_picks([(disc, "")]),
+                                               dir1=common.format_picks([(x(body), "")]), count1="3",
+                                               spacing1=spacing))
+            doc.recompute()
+            self.assertAlmostEqual(f.Shape.Volume, 14000 + 3 * math.pi * 500, places=2)  # 18712.39
+            self.assertEqual(len(f.Shape.Solids), 1, spacing)
+            self.assertFalse(faulty(f.Shape), spacing)
+            self.assertEqual(bool(safe.unsound(f)), said, spacing)
+            App.closeDocument(doc.Name)
+        doc, body, disc = block(40)
+        yz = [o for o in body.Origin.OriginFeatures if o.Role == "YZ_Plane"][0]
+        m = solid_mirror.create(doc, body, None, dict(solid_mirror.defaults(doc, body, None), solid=body.Name,
+                                                      plane=yz.Name, result="join"))
+        doc.recompute()
+        self.assertEqual(len(m.Shape.Solids), 1)
+        self.assertAlmostEqual(m.Shape.Volume, 2 * (8000 + math.pi * 500), places=2)
+        self.assertFalse(faulty(m.Shape))
+        App.closeDocument(doc.Name)
+
     def test_new_pattern_becomes_the_tip(self):
         for k in (patterns.RECT, patterns.CIRC, patterns.MIRROR):
             f = k.create(self.doc, self.body, None, dict(k.defaults(self.doc, self.body, None), features=self.pad_pick))
@@ -487,3 +559,206 @@ class PickingWhatCannotBeRepeatedTest(unittest.TestCase):
         self.assertEqual([o.Name for o in f.Originals], [self.shaft.Name, self.thread.Name])
         self.assertNotIn("Invalid", f.State, f.getStatusString())
         self.assertGreater(f.Shape.BoundBox.YLength, 30)  # the second shaft stands 30 mm beside the first
+
+
+class OwnPatternTest(unittest.TestCase):
+    """InCad's own Pattern on OpenCASCADE (incad.features.own_pattern): features or a whole Solid, FreeCAD's
+    patterns of older files taken over on edit."""
+
+    def setUp(self):
+        self.doc = util.new_doc("Op")
+        self.body, self.pad = util.padded_part(self.doc, 10, incad=True)  # 20 x 10 x 10
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def _origin(self, role, body=None):
+        return [o for o in (body or self.body).Origin.OriginFeatures if o.Role == role][0]
+
+    def _top_sketch(self, feature, circles, z=10):
+        import Part
+        top = [i + 1 for i, f in enumerate(feature.Shape.Faces)
+               if abs(f.CenterOfMass.z - z) < 1e-6 and f.Surface.TypeId == "Part::GeomPlane"][0]
+        sk = self.body.newObject("Sketcher::SketchObject", "Sk")
+        sk.AttachmentSupport = [(feature, "Face%d" % top)]
+        sk.MapMode = "FlatFace"
+        for x, y, r in circles:
+            sk.addGeometry(Part.Circle(App.Vector(x, y, 0), App.Vector(0, 0, 1), r))
+        self.doc.recompute()
+        return sk
+
+    def _extrude(self, sk, operation, distance):
+        from incad.features import extrude
+        f = extrude.create(self.doc, self.body, sk, dict(extrude.defaults(self.doc, self.body, sk),
+                                                         operation=operation, distance=distance))
+        self.doc.recompute()
+        return f
+
+    def _sound(self, f, volume):
+        self.assertNotIn("Invalid", f.State, f.getStatusString())
+        self.assertEqual(len(f.Shape.Solids), 1)
+        self.assertAlmostEqual(f.Shape.Volume, volume, places=3)
+        f.Shape.check(True)  # raises when faulty
+
+    def test_a_grid_of_holes_and_of_bosses(self):
+        import math
+        k = patterns.RECT
+        hole = self._extrude(self._top_sketch(self.pad, [(3, 3, 1)]), "cut", "5 mm")
+        f = k.create(self.doc, self.body, None, dict(
+            k.defaults(self.doc, self.body, None), features=common.format_picks([(hole, "")]), count1="3",
+            spacing1="6 mm", two_directions=True, count2="2", spacing2="4 mm"))
+        self.doc.recompute()
+        self.assertTrue(own_pattern.is_own(f))
+        self.assertIs(kind_for(f), k)
+        self.assertIs(self.body.Tip, f)
+        self._sound(f, 2000 - 6 * math.pi * 5)
+        boss = self._extrude(self._top_sketch(f, [(3, 5, 0.8)]), "join", "2 mm")  # between the holes
+        g = k.create(self.doc, self.body, None, dict(
+            k.defaults(self.doc, self.body, None), features=common.format_picks([(boss, "")]), count1="3",
+            spacing1="6 mm", two_directions=True, count2="2", spacing2="4 mm"))
+        self.doc.recompute()
+        self.assertEqual(len(g.Shape.Solids), 1)
+        self._sound(g, boss.Shape.Volume + 5 * math.pi * 0.64 * 2)  # 5 more bosses on top
+
+    def test_six_holes_round_an_axis(self):
+        import math
+        k = patterns.CIRC
+        hole = self._extrude(self._top_sketch(self.pad, [(13, 5, 1)]), "cut", "4 mm")
+        axis = self.doc.addObject("PartDesign::Line", "Axis6")
+        self.body.addObject(axis)
+        axis.Placement = App.Placement(App.Vector(10, 5, 0), App.Rotation())
+        self.doc.recompute()
+        f = k.create(self.doc, self.body, None, dict(k.defaults(self.doc, self.body, None),
+                                                     features=common.format_picks([(hole, "")]),
+                                                     axis=axis.Name, count="6"))
+        self.doc.recompute()
+        self.assertTrue(own_pattern.is_own(f))
+        self._sound(f, 2000 - 6 * math.pi * 4)
+        self.assertEqual(k.read(self.doc, f)["count"], "6")
+
+    def test_mirror_of_a_hole(self):
+        import math
+        k = patterns.MIRROR
+        hole = self._extrude(self._top_sketch(self.pad, [(4, 5, 1)]), "cut", "3 mm")
+        yz = self.doc.addObject("PartDesign::Plane", "Mid")
+        self.body.addObject(yz)
+        yz.Placement = App.Placement(App.Vector(10, 0, 0), App.Rotation(App.Vector(0, 1, 0), 90))
+        self.doc.recompute()
+        f = k.create(self.doc, self.body, None, dict(k.defaults(self.doc, self.body, None),
+                                                     features=common.format_picks([(hole, "")]), plane=yz.Name))
+        self.doc.recompute()
+        self.assertTrue(own_pattern.is_own(f))
+        self._sound(f, 2000 - 2 * math.pi * 3)
+        cut = self.pad.Shape.cut(f.Shape)
+        self.assertAlmostEqual(cut.BoundBox.XMax, 17.0, places=3)  # the copy at x 16..17
+
+    def test_solid_joined_into_itself(self):
+        k = patterns.RECT
+        f = k.create(self.doc, self.body, None, dict(k.defaults(self.doc, self.body, None), mode="solid",
+                                                     solid=self.body.Name, result="join", count1="3",
+                                                     spacing1="20 mm"))
+        self.doc.recompute()
+        self.assertIs(f.getParentGeoFeatureGroup(), self.body)
+        self.assertIs(self.body.Tip, f)
+        self._sound(f, 6000)  # three blocks side by side, one solid
+        self.assertEqual(len(f.Shape.Faces), 6)  # refined: one box
+        back = k.read(self.doc, f)
+        self.assertEqual((back["mode"], back["solid"], back["result"]), ("solid", self.body.Name, "join"))
+
+    def test_solid_copies_as_a_new_solid_follow_it(self):
+        from incad.core import document
+        k = patterns.CIRC
+        f = k.create(self.doc, self.body, None, dict(k.defaults(self.doc, self.body, None), mode="solid",
+                                                     solid=self.body.Name, result="new", count="4",
+                                                     axis=self._origin("Z_Axis").Name))
+        self.doc.recompute()
+        target = f.getParentGeoFeatureGroup()
+        self.assertIsNot(target, self.body)
+        self.assertEqual(len(document.bodies(self.doc)), 2)
+        self.assertAlmostEqual(target.Shape.Volume, 3 * 2000, places=3)
+        self.pad.Length = 15  # the source grows: the copies follow
+        self.doc.recompute()
+        self.assertAlmostEqual(target.Shape.Volume, 3 * 3000, places=3)
+        self.assertEqual(k.read(self.doc, f)["result"], "new")
+
+    def test_solid_copies_each_a_new_solid(self):
+        from incad.core import document
+        k = patterns.RECT
+        v = dict(k.defaults(self.doc, self.body, None), mode="solid", solid=self.body.Name, result="each",
+                 count1="3", spacing1="30 mm")
+        f = k.create(self.doc, self.body, None, v)
+        self.doc.recompute()
+        steps = own_pattern.group_of(f)
+        self.assertEqual([s.Copy for s in steps], [2, 3])
+        self.assertEqual(len(document.bodies(self.doc)), 3)
+        for s, x in zip(steps, (30, 60)):
+            self.assertAlmostEqual(s.getParentGeoFeatureGroup().Shape.Volume, 2000, places=3)
+            self.assertAlmostEqual(s.getParentGeoFeatureGroup().Shape.BoundBox.XMin, x, places=3)
+        self.assertIs(kind_for(steps[1]), k)
+        f = k.update(self.doc, steps[1], dict(k.read(self.doc, steps[1]), count1="4"))
+        self.doc.recompute()
+        steps = own_pattern.group_of(f)
+        self.assertEqual([s.Copy for s in steps], [2, 3, 4])
+        self.assertEqual(len(document.bodies(self.doc)), 4)
+        self.pad.Length = 5
+        self.doc.recompute()
+        for s in steps:
+            self.assertAlmostEqual(s.getParentGeoFeatureGroup().Shape.Volume, 1000, places=3)
+
+    def _old_pattern(self):
+        """A FreeCAD LinearPattern as the dialog made it before (count and spacing parameters) and a cut drawn on its
+        top after it."""
+        k = patterns.RECT
+        hole = self._extrude(self._top_sketch(self.pad, [(2, 5, 1)]), "cut", "5 mm")
+        old = self.body.newObject("PartDesign::LinearPattern", "RectangularPattern")
+        patterns._rect_apply(self.doc, self.body, old, dict(
+            k.defaults(self.doc, self.body, None), features=common.format_picks([(hole, "")]), count1="3",
+            spacing1="5 mm"))
+        self.body.Tip = old
+        self.doc.recompute()
+        old.Label = "Holes"
+        later = self._extrude(self._top_sketch(old, [(17, 5, 0.5)]), "cut", "2 mm")
+        return old, later
+
+    def test_an_old_freecad_pattern_becomes_ours_on_edit(self):
+        import math
+        k = patterns.RECT
+        old, later = self._old_pattern()
+        self.assertIs(kind_for(old), k)
+        before = later.Shape.Volume
+        values = k.read(self.doc, old)
+        self.assertEqual((values["count1"], values["spacing1"]), ("3", "5 mm"))
+        count_param = model.bound_parameter(old, "Occurrences")
+        name = old.Name
+        f = k.update(self.doc, old, values)
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject(name))
+        self.assertTrue(own_pattern.is_own(f))
+        self.assertEqual(f.Label, "Holes")
+        self.assertEqual(model.bound_parameter(f, "Occurrences"), count_param)  # its parameters kept
+        self.assertIs(later.BaseFeature, f)
+        self.assertIs(later.Profile[0].AttachmentSupport[0][0], f)
+        self.assertAlmostEqual(later.Shape.Volume, before, places=3)
+        self._sound(f, 2000 - 3 * math.pi * 5)
+        model.set_model_parameter(self.doc, count_param, "2")  # the same parameter drives ours
+        self.assertEqual(f.Occurrences, 2)
+        self.assertAlmostEqual(f.Shape.Volume, 2000 - 2 * math.pi * 5, places=3)
+
+    def test_undo_brings_the_old_pattern_back(self):
+        k = patterns.RECT
+        old, later = self._old_pattern()
+        name, volume = old.Name, later.Shape.Volume
+        self.doc.openTransaction("Edit")
+        f = k.update(self.doc, old, dict(k.read(self.doc, old), count1="2"))
+        self.doc.recompute()
+        self.doc.commitTransaction()
+        self.assertTrue(own_pattern.is_own(f))
+        self.doc.undo()
+        self.doc.recompute()
+        back = self.doc.getObject(name)
+        self.assertEqual(back.TypeId, "PartDesign::LinearPattern")
+        self.assertAlmostEqual(later.Shape.Volume, volume, places=3)
+        self.doc.redo()
+        self.doc.recompute()
+        self.assertIsNone(self.doc.getObject(name))
+

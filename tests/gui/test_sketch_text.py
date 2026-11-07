@@ -102,7 +102,7 @@ def test_2_extrude_raises_the_letters():
     harness.pump(1500)
     ok()
     tip = document.primary_body(App.ActiveDocument).Tip
-    assert tip.TypeId == "PartDesign::Pad" and "Invalid" not in tip.State, tip.getStatusString()
+    assert tip.TypeId == "PartDesign::FeatureAdditivePython" and "Invalid" not in tip.State, tip.getStatusString()
     assert abs(tip.Shape.BoundBox.ZMax - 2.0) < 1e-6 and tip.Shape.Volume > 10, (tip.Shape.BoundBox, tip.Shape.Volume)
     assert not t.ViewObject.Visibility, "the used text is hidden"
     ST["pad"], ST["vol"] = tip.Name, tip.Shape.Volume

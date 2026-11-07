@@ -39,6 +39,7 @@ _RAW = (
     ("result of offsetting is null", "The wall is as thick as the profile, or thicker: make it thinner"),
     ("height too small", "Give the coil a height above zero"),
     ("Pitch too small", "Give the coil a pitch above zero"),
+    ("Pattern length too small", "The spacing must be more than 0: give the copies a spacing"),
     ("Invalid edge link", "An edge it was on is gone after the change: edit it and pick the edges again"),
     ("Invalid face link", "A face it was on is gone after the change: edit it and pick the faces again"),
     ("Must not intersect sketch", "What it goes to lies in the sketch's own plane: pick a face or point off it"),
