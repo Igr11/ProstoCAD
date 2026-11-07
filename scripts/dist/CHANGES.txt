@@ -19,6 +19,7 @@ Improvements
 - Revolve and Revolve Cut are InCad's own, on OpenCASCADE directly: a full or partial turn, a profile touching the axis or lying along it, and a revolve standing on a face of the part (a disc touching the face's edges) or cut into it each make one sound solid, its volume exact, every edge sharp. The axis line keeps its kind (a normal line stays normal) and is no part of the profile. A revolve across a modeled thread still goes before the thread, at once. Revolves in older files open as they are and become the new kind, with the same values and parameters, when edited; a Pattern repeats the new kind too.
 
 Bug fixes
+- Project Geometry in a sketch standing on a face of the part did nothing when an edge or face of that same part was clicked (only other parts and planes could be projected); it now projects it, linked, as from any other place. The plane a sketch stands on still lets the click through.
 - Hole ▸ Insert went Through All when the hole had been that before, so the insert's hole ran through the part; choosing Insert now makes it as deep as the insert (M2.5: 6.7 mm).
 - Mirror (or a pattern) of a Rectangular / Circular Pattern repeated only the pattern's first feature; it now repeats every copy.
 - A minus Spacing in Rectangular Pattern was taken silently and refused only at OK; it now runs the copies the other way.

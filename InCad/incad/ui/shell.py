@@ -1547,7 +1547,10 @@ class Shell(QtCore.QObject):
         sk = self.sketches.editing()
         if sk is None or not hits:
             return False
-        own = {s[0].Name for s in (getattr(sk, "AttachmentSupport", None) or []) if s and s[0] is not None}
+        # the plane the sketch stands on lets the click through; the part whose face it stands on does not: its
+        # edges are projected as any other (2026-11-07: all of that part was skipped, and its clicks did nothing)
+        own = {s[0].Name for s in (getattr(sk, "AttachmentSupport", None) or [])
+               if s and s[0] is not None and s[0].TypeId in ("PartDesign::Plane", "App::Plane", "App::Origin")}
         solid = [h for h in hits if self._plane_hit(sk, h) is None and h.get("Object") not in own]
         edge = next((h for h in solid if str(h.get("Component", "")).startswith(("Edge", "Vertex"))), None)
         planes_first = solid[:1] != hits[:1]  # a see-through plane lies in front of what was clicked
