@@ -310,10 +310,13 @@ def _right(shape, want, scale, full_check=True):
 
 
 def _sew(faces):
-    """One closed solid sewn of `faces`, or None."""
+    """One closed solid sewn of `faces`, or None. The faces are copied together, as one compound: the edges two of
+    them share stay shared (copied face by face, each had its own, sewing joined them back a little off, and the
+    result was faulty to the full check on any part with many faces - the user's part with a modeled thread: every
+    Extrude went the slow way, 2026-11-08); the part itself is never touched by the sewing."""
     for tol in SEW:
         try:
-            c = Part.Compound([f.copy() for f in faces])
+            c = Part.Compound(list(faces)).copy()
             c.sewShape(tol)
             shells = c.Shells
             if len(shells) != 1 or not shells[0].isClosed():
@@ -446,7 +449,7 @@ def _glued(solid):
     return None
 
 
-def _finished(shape, refine, many, base_faulty):
+def _finished(shape, refine, many, base_faulty, glue=True):
     """(shape, sound): the result refined when asked, and sound to the full check where it can be: refined, then
     as it is, each glued (see _glued) when faulty. OCC's Refine merged the two halves of a round wall a disc cut
     inscribed in a face leaves, past the line where it touches the side, and that came out faulty. A big part (an
@@ -460,10 +463,22 @@ def _finished(shape, refine, many, base_faulty):
     for s in ([refined, shape] if refined is not shape else [shape]):
         if s is not refined and not _faulty(s):
             return s, True
+        if not glue:
+            continue
         glued = _glued(s)
         if glued is not None:
             return glued, True
     return refined, False
+
+
+def _glued_first(found):
+    """The first of these faulty results [(refined, as made, how)] that gluing makes sound: (shape, how) or None."""
+    for refined, shape, how in found:
+        for s in ([refined, shape] if refined is not shape else [shape]):
+            glued = _glued(s)
+            if glued is not None:
+                return glued, how
+    return None
 
 
 def _refined(shape):
@@ -540,18 +555,24 @@ def _same_surface(f, g):
     return True
 
 
+def _box(g):
+    try:  # (exact: BoundBox follows the display's triangles once the part is drawn, inside a curve)
+        bb = g.optimalBoundingBox(False, False)
+    except Exception:
+        bb = g.BoundBox
+    bb.enlarge(1e-6)
+    return bb
+
+
 def _source(face, pools):
-    """(pool letter, index) of the face of the part / tool `face` lies on, or None."""
+    """(pool letter, index) of the face of the part / tool `face` lies on, or None. pools: (letter, faces, their
+    boxes) - the boxes made once for all the faces (made for each, 9 000 of them took 0.8 s on a part with a
+    modeled thread)."""
     pt = _point_in(face)
     v = Part.Vertex(pt)
-    for letter, pool in pools:
+    for letter, pool, boxes in pools:
         for i, g in enumerate(pool):
-            try:  # (exact: BoundBox follows the display's triangles once the part is drawn, inside a curve)
-                bb = g.optimalBoundingBox(False, False)
-            except Exception:
-                bb = g.BoundBox
-            bb.enlarge(1e-6)
-            if not bb.isInside(pt) or not _same_surface(face, g):
+            if not boxes[i].isInside(pt) or not _same_surface(face, g):
                 continue
             try:
                 if g.distToShape(v)[0] < LIN:
@@ -578,7 +599,7 @@ def named(shape, base, tool_shape, operation):
         pools, known = [], {}
         for letter, src in (("B", base), ("T", tool_shape)):
             faces = src.Faces
-            pools.append((letter, faces))
+            pools.append((letter, faces, [_box(g) for g in faces]))
             for i, g in enumerate(faces):
                 known.setdefault(g.hashCode(), (letter, i))
         sources = {"B": base, "T": tool_shape}
@@ -649,7 +670,7 @@ def _combine(base, tool_shape, operation, faces, origin, d, refine):
     if operation in ("join", "cut") and faces and origin is not None and d is not None:
         sewn = ("sewn on the face", lambda: _on_face(base, tool_shape, faces, origin, d, operation == "cut", vc))
         tries = tries[:1] + [sewn] + tries[1:] if many else [sewn] + tries
-    found, first, known = [], None, []
+    found, first, known, faulty = [], None, [], []
 
     def base_faulty():
         if not known:
@@ -672,10 +693,16 @@ def _combine(base, tool_shape, operation, faces, origin, d, refine):
                 found.append(how)
         if not right:
             continue
-        shape, sound = _finished(shape, refine, many, base_faulty)
+        made = shape
+        shape, sound = _finished(made, refine, many, base_faulty, glue=False)
         if sound or base_faulty():
             return shape, how, sound  # (a faulty part: healed and made again, see combine)
         first = first or (shape, how, False)
+        faulty.append((shape, made, how))
+    if faulty:  # gluing (seconds each on a part with a modeled thread) only when no way came out sound by itself:
+        glued = _glued_first(faulty)  # the sewn way's faulty result was glued twice, ~20 s, before the Boolean
+        if glued is not None:         # gave a sound one in 2 s (the user: "Extrude takes forever", 2026-11-08)
+            return glued[0], glued[1], True
     if first is not None:
         return first
     raise ValueError("OpenCASCADE could not %s it soundly (%s): move the profile a little, or change the extent"

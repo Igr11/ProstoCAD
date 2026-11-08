@@ -80,10 +80,11 @@ class RevolveFeature:
     def execute(self, obj):
         from incad.core import revolve_solid
         sk = profile_of(obj)
-        if sk is None or sk.Shape.isNull():
+        if sk is None:
             raise ValueError("the Revolve has no profile")
+        from incad.core import regions
         point, d = axis_line(obj)
-        faces = revolve_solid.profile_faces(sk.Shape, point, d)
+        faces = regions.faces_of(sk, lambda shape: revolve_solid.profile_faces(shape, point, d))
         obj.Base, obj.Axis = point, d
         turn = -d if obj.Reversed else d
         angle, start = obj.Angle.Value, 0.0

@@ -291,16 +291,84 @@ def make_profile(doc, body, source, face):
     _attach_like(sk, source)
     sk.addProperty("App::PropertyString", REGION, "InCad", "The sketch and area this profile is built from")
     sk.setPropertyStatus(REGION, "Hidden")
-    faces = face if isinstance(face, (list, tuple)) else [face]
-    pts = [inner_point(f) for f in faces]
-    data = {"source": source.Name, "point": [pts[0].x, pts[0].y]}
-    if len(pts) > 1:
-        data["points"] = [[p.x, p.y] for p in pts]
-    setattr(sk, REGION, json.dumps(data))
-    fill(sk, face, source)
     sk.Visibility = False
+    set_areas(sk, face, source)
     doc.recompute()
     return sk
+
+
+def set_areas(profile, faces, source=None):
+    """The profile takes these areas of its source (a face, a list of them, or none yet: an Extrude whose window
+    waits for the clicks)."""
+    source = source or source_of(profile)
+    faces = list(faces) if isinstance(faces, (list, tuple)) else [faces]
+    pts = [inner_point(f) for f in faces]
+    data = {"source": source.Name, "points": [[p.x, p.y] for p in pts]}
+    if pts:
+        data["point"] = [pts[0].x, pts[0].y]  # (what files before 0.17.5 read)
+    setattr(profile, REGION, json.dumps(data))
+    fill(profile, faces, source)
+
+
+def _points(profile):
+    data = json.loads(getattr(profile, REGION) or "{}")
+    if "points" in data:
+        return data["points"]
+    return [data["point"]] if "point" in data else []
+
+
+def picked_areas(profile, faces):
+    """Indexes of `faces` (the source's areas) this profile takes."""
+    out = []
+    for x, y in _points(profile):
+        for i, f in enumerate(faces):
+            if i not in out and f.isInside(App.Vector(x, y, 0), 1e-6, True):
+                out.append(i)
+                break
+    return out
+
+
+NO_AREA = "click an area of the sketch"
+
+
+def faces_of(sk, made):
+    """The faces of a feature's profile: an area copy's own areas (see area_faces), else made(sk.Shape) from its
+    lines. A copy with no area taken yet: ValueError (the window says to click one)."""
+    faces = area_faces(sk) if is_profile(sk) else None
+    if faces == []:
+        raise ValueError(NO_AREA)
+    if faces is None:
+        if sk.Shape.isNull():
+            raise ValueError("the profile is empty")
+        faces = made(sk.Shape)
+    return faces
+
+
+def area_faces(profile):
+    """The faces a feature on this area copy is made of, where the profile is: the source's own areas (the ones
+    holding the remembered points), not faces made again from the copy's lines - two areas touching at a corner
+    (two crossed rectangles, both L-shaped halves taken) were read back from the lines as the two whole rectangles,
+    the user 2026-11-08. [] when no area is taken yet; None when the source or an area is gone (the copy's lines
+    then, as before)."""
+    source = source_of(profile)
+    if source is None:
+        return None
+    pts = _points(profile)
+    if not pts:
+        return []
+    faces = []
+    every = regions(source)
+    for x, y in pts:
+        face = region_at(source, App.Vector(x, y, 0), every)
+        if face is None:
+            return None
+        faces.append(face)
+    out = []
+    for f in merged(faces):
+        f = f.copy()
+        f.Placement = profile.Placement
+        out.append(f)
+    return out
 
 
 def is_profile(obj):
@@ -325,10 +393,10 @@ def update(profile):
     source = source_of(profile)
     if source is None:
         return False
-    data = json.loads(getattr(profile, REGION))
     faces = []
-    for x, y in data.get("points") or [data["point"]]:
-        face = region_at(source, App.Vector(x, y, 0))
+    every = regions(source)
+    for x, y in _points(profile):
+        face = region_at(source, App.Vector(x, y, 0), every)
         if face is None:
             return False
         faces.append(face)

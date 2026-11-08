@@ -405,52 +405,9 @@ class _SelectionWatch:
         self._check()
 
 
-AREA_COLOUR, AREA_PICKED = (0.95, 0.62, 0.29), (0.25, 0.55, 0.95)
-
-
 def _area_prompt(kind):
-    return "Click the area to %s; Shift-click to take several, %s all (Esc cancels)" % (
+    return "Click the areas to %s, a click again leaves one out; %s all" % (
         kind.TITLE.lower(), "⌘A" if host.MAC else "Ctrl+A")
-
-
-class _RegionPicker:
-    """Waits for a click on one of the shown areas of a sketch, then starts the feature on it. Shift-click takes an
-    area in (or out again) and waits for more (the user: several areas for one Extrude, Revolve…); a plain click
-    starts the feature on the areas taken and the one clicked."""
-
-    def __init__(self, shell, kind, doc_name, body_name, source_name, names, faces):
-        self.shell, self.kind = shell, kind
-        self.doc_name, self.body_name, self.source_name, self.names, self.faces = doc_name, body_name, source_name, names, faces
-        self.picked = []
-
-    def addSelection(self, doc_name, obj_name, sub, pnt):
-        if doc_name != self.doc_name or obj_name not in self.names:
-            return
-        index, shell = self.names.index(obj_name), self.shell
-        if QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier:
-            QtCore.QTimer.singleShot(0, lambda: shell._region_pick is self and self.toggle(index))
-            return
-        chosen = sorted(set(self.picked) | {index})
-        QtCore.QTimer.singleShot(0, lambda: shell._region_pick is self and shell._region_picked(self, chosen))
-
-    def toggle(self, index):
-        import FreeCAD as App
-        import FreeCADGui as Gui
-        if index in self.picked:
-            self.picked.remove(index)
-        else:
-            self.picked.append(index)
-        try:
-            vo = App.getDocument(self.doc_name).getObject(self.names[index]).ViewObject
-            vo.ShapeColor = AREA_PICKED if index in self.picked else AREA_COLOUR
-        except Exception:
-            pass
-        Gui.Selection.clearSelection()  # the next click on it counts again
-        what = self.kind.TITLE.lower()
-        self.shell.status.set_prompt(
-            "%d areas taken: Shift-click more, or click one more to %s them, %s all (Esc cancels)" % (
-                len(self.picked), what, "⌘A" if host.MAC else "Ctrl+A")
-            if self.picked else _area_prompt(self.kind))
 
 
 class _ProfilePicker:
@@ -2922,50 +2879,27 @@ class Shell(QtCore.QObject):
         return None
 
     def _profile_from_areas(self, kind, doc, body, source):
-        """Inventor: the areas between the sketch's lines are the profiles. One area: used at once. Several: they
-        are shown and the user clicks the one to use (Esc cancels)."""
+        """Inventor: the areas between the sketch's lines are the profiles. One area: used at once. Several: the
+        window opens at once and the areas are clicked in it (the user 2026-11-08: no click before the window; the
+        feature session shows them, see feature_session._AreaChoice)."""
         from incad.core import regions
         faces = regions.regions(source)
         if not faces:
             raise ValueError("%s has no closed area to %s" % (source.Label, kind.TITLE.lower()))
-        if len(faces) == 1:  # one area: used at once (separate shapes are picked too now; ⌘A takes them all)
-            prof = regions.make_profile(doc, body, source, faces[0])
-            self._open_session(kind, doc, body, profile=prof)
-            return
         self._cancel_region_pick()
-        doc.openTransaction("Pick area")  # the shown areas vanish with the pick (aborted): no undo step
-        names = []
-        pl = source.getGlobalPlacement()
-        for i, f in enumerate(faces):
-            o = doc.addObject("Part::Feature", "Area%d" % (i + 1))
-            o.Label = "Area %d" % (i + 1)
-            o.addProperty("App::PropertyBool", "InCadAreaPick", "InCad", "Shown while an area is picked")
-            shape = f.copy()
-            shape.Placement = pl
-            o.Shape = shape
-            try:
-                vo = o.ViewObject
-                vo.ShapeColor = AREA_COLOUR
-                vo.Transparency = 55
-                vo.LineWidth = 1.0
-            except Exception:
-                pass
-            names.append(o.Name)
-        doc.recompute()
-        import FreeCADGui as Gui
-        self._region_pick = _RegionPicker(self, kind, doc.Name, body.Name, source.Name, names, faces)
-        Gui.Selection.clearSelection()
-        Gui.Selection.addObserver(self._region_pick)
-        self.status.set_prompt(_area_prompt(kind))
-        log.report("info", "%d areas: click the one to %s" % (len(faces), kind.TITLE.lower()))
-        self.schedule_refresh()
+        prof = regions.make_profile(doc, body, source, faces[0] if len(faces) == 1 else [])
+        self._open_session(kind, doc, body, profile=prof)
+
+    def _areas_shown(self):
+        fs = self.feature_session
+        return fs is not None and getattr(fs, "_areas", None) is not None
 
     def _purge_stale_areas(self, doc):
         """The "Area n" faces shown while an area is picked are gone once it is over; a pick left open (another
         command started) left them in the part, over its edges (Chamfer then picked them). Removed when no pick
         runs: the marked ones, and older unmarked ones (a Part::Feature "Area n" outside every Solid, used by
         nothing)."""
-        if doc is None or self._region_pick is not None:
+        if doc is None or self._region_pick is not None or self._areas_shown():
             return
         stale = []
         for o in doc.Objects:
@@ -3000,26 +2934,9 @@ class Shell(QtCore.QObject):
         self.schedule_refresh()
 
     def _take_all_areas(self):
-        """⌘A / Ctrl+A while the areas are shown: the feature on all of them."""
-        pick = self._region_pick
-        if pick is not None:
-            self._region_picked(pick, list(range(len(pick.faces))))
-
-    def _region_picked(self, pick, indices):
-        import FreeCAD as App
-        from incad.core import regions
-        faces, kind = [pick.faces[i] for i in indices], pick.kind
-        face = faces if len(faces) > 1 else faces[0]
-        doc = App.getDocument(pick.doc_name)
-        self._cancel_region_pick()
-        body, source = doc.getObject(pick.body_name), doc.getObject(pick.source_name)
-        if body is None or source is None:
-            return
-        try:
-            prof = regions.make_profile(doc, body, source, face)
-            self._open_session(kind, doc, body, profile=prof)
-        except Exception as e:
-            log.report("error", "%s: %s" % (kind.TITLE, e), traceback.format_exc())
+        """⌘A / Ctrl+A while a window shows a sketch's areas: all of them."""
+        if self._areas_shown():
+            self.feature_session._areas.take_all()
 
     def start_feature(self, kind):
         from incad.core import assembly, document
@@ -3310,6 +3227,9 @@ class Shell(QtCore.QObject):
         if getattr(self, "_esc_computing", None) is None:
             self._esc_computing = _EscWhileComputing(self.mw)
             QtWidgets.QApplication.instance().installEventFilter(self._esc_computing)
+        if getattr(self, "_outside_quit", None) is None:  # Dock ▸ Quit and the like end as ⌘Q does
+            self._outside_quit = _OutsideQuit(self.mw)
+            QtWidgets.QApplication.instance().installEventFilter(self._outside_quit)
         if getattr(self, "_value_styler", None) is None:  # a sketch tool's sizes at the pointer: one look for all
             from incad.ui import value_fields
             self._value_styler = value_fields.Styler(self.mw)
@@ -3402,6 +3322,9 @@ class Shell(QtCore.QObject):
             if obj is self.mw:
                 if etype == QtCore.QEvent.Close and not self.active:
                     shutdown()  # still waiting for a FreeCAD task: nothing to ask, just leave nothing behind
+                elif etype == QtCore.QEvent.Close and self.active and _quit_from_outside() and _defer_quit(self.mw):
+                    event.ignore()  # (see _defer_quit)
+                    return True
                 elif etype == QtCore.QEvent.Close and self.active:
                     # quitting (⌘Q, Dock, app menu, red button): ask about unsaved files while InCad still shows
                     # (Cancel keeps everything), then switch off — FreeCAD saves its layout right after — and
@@ -3409,6 +3332,8 @@ class Shell(QtCore.QObject):
                     if not _ask_unsaved():
                         event.ignore()
                         return True
+                    global _QUIT_STARTED
+                    _QUIT_STARTED = time.monotonic()  # (see _resume_after_cancelled_quit)
                     QtCore.QTimer.singleShot(0, _resume_after_cancelled_quit)  # only runs if the quit is cancelled
                     shutdown()  # deletes this object: nothing may touch self after it
                     _mark_answered()  # switching off may have touched documents: already answered
@@ -3726,15 +3651,15 @@ class Shell(QtCore.QObject):
             self.status.set_prompt("Create or open a part" if doc is None else host.brand("This file was not made in InCad"))
         if doc is not None and self._point_pick is None:
             self._purge_old_markers(doc)
-        if self._region_pick is not None:
-            self.status.set_prompt(_area_prompt(self._region_pick.kind))
+        if self._areas_shown():
+            self.status.set_prompt(_area_prompt(self.feature_session.kind))
         if self._point_pick is not None:
             pick = self._point_pick
             self.status.set_prompt(pick.prompt if not pick.picked else
                                    "%d of %d points picked (Esc cancels)" % (len(pick.picked), pick.count))
         for cmd_id, act in self._shortcuts.items():
             if cmd_id == "_all_areas":
-                act.setEnabled(self._region_pick is not None)
+                act.setEnabled(self._areas_shown())
                 continue
             if cmd_id == "_esc":
                 act.setEnabled(mode == "sketch" or self.sketches.picking or self._profile_pick is not None or
@@ -5288,13 +5213,75 @@ def _is_start_page(window):
 _FILTERED_EVENTS = (QtCore.QEvent.Resize, QtCore.QEvent.Close, QtCore.QEvent.ChildAdded, QtCore.QEvent.Show)
 
 
+def _quit_from_outside():
+    """Is the main window being closed by macOS's request to end the app (Qt's commitData: an outside quit)?"""
+    try:
+        return bool(QtWidgets.QApplication.instance().isSavingSession())
+    except Exception:
+        return False
+
+
+_QUIT_DEFERRED = None  # an outside quit refused: "pending" until InCad's own close starts, then "closing"
+
+
+def _defer_quit(mw):
+    """A quit from outside (Dock ▸ Quit, a script's quit, logging out): macOS asks the app to end, Qt closes the
+    windows inside that request (and sends the app a Quit), and FreeCAD then ends the process right there with
+    Python still running - it crashed at exit every time, and FreeCAD's settings were not saved (2026-11-08). The
+    request is refused - its close and its Quit both - and the main window closed a moment later, as ⌘Q closes
+    it: the same questions, a clean end. False once that close has started: then everything goes ahead."""
+    global _QUIT_DEFERRED
+    if _QUIT_DEFERRED == "closing":
+        return False
+    if _QUIT_DEFERRED == "pending":
+        return True  # (the same request's other event)
+    _QUIT_DEFERRED = "pending"
+
+    def close():
+        global _QUIT_DEFERRED
+        _QUIT_DEFERRED = "closing"
+        try:
+            mw.close()
+        finally:
+            _QUIT_DEFERRED = None  # still here: the quit was cancelled
+    QtCore.QTimer.singleShot(0, close)
+    log.logger().info("Quit from outside: closing the window as Quit does")
+    return True
+
+
+class _OutsideQuit(QtCore.QObject):
+    """The application's Quit event macOS sends when asked from outside: deferred (see _defer_quit)."""
+
+    def eventFilter(self, obj, event):
+        try:
+            if event.type() == QtCore.QEvent.Quit and event.spontaneous() and _shell is not None and _shell.active \
+                    and _defer_quit(_shell.mw):
+                event.ignore()
+                return True
+        except Exception:
+            pass
+        return False
+
+
+_QUIT_STARTED = None  # time.monotonic() of the last quit InCad agreed to (its main window's close let through)
+QUIT_SETTLE = 1.5  # s: a quit not over by then was cancelled
+
+
 def _resume_after_cancelled_quit():
-    """FreeCAD cancelled the quit (or the window stayed open): InCad starts again."""
+    """FreeCAD cancelled the quit (or the window stayed open): InCad starts again - once the close is surely over.
+    A quit from outside (Dock ▸ Quit, a script's quit, logging out) ends the process inside the close, but runs
+    events first: this came at once, took the quit for cancelled and built InCad again after it was switched off,
+    and the process then crashed at exit on those new objects (macOS crash reports, 2026-11-08)."""
+    global _QUIT_STARTED
     import FreeCADGui as Gui
     from incad.qt import dispose_now
     if QtWidgets.QApplication.activeModalWidget() is not None:  # e.g. a question still open: wait for it
         QtCore.QTimer.singleShot(300, _resume_after_cancelled_quit)
         return
+    if _QUIT_STARTED is not None and time.monotonic() - _QUIT_STARTED < QUIT_SETTLE:
+        QtCore.QTimer.singleShot(300, _resume_after_cancelled_quit)  # the quit may still be going on
+        return
+    _QUIT_STARTED = None
     try:
         dispose_now(False)
         wb = Gui.activeWorkbench()

@@ -15,9 +15,11 @@ ICON = "emboss"
 TYPES = ("PartDesign::FeaturePython",)
 MARK = "InCadEmboss"  # its settings (JSON): what tells an Emboss apart from the other Python features
 PROPS = {"depth": "Depth"}
+DEPTH_STEP = 0.05  # mm: the arrows' step of the depth (the user 2026-11-08; Shift ×10)
+
 FIELDS = (
     Field("operation", "Operation", "choice", (("raise", "Emboss"), ("engrave", "Engrave")), "raise"),
-    Field("depth", "Depth", "value_length", default="1 mm"),
+    Field("depth", "Depth", "value_length", default="1 mm", step=lambda values: DEPTH_STEP),
     Field("face", "Face", "pick", pick="emboss_face"),
     Field("around", "Around", "choice", (("drawn", "As drawn"), ("even", "Evenly round")), "drawn"),
 )
@@ -117,6 +119,12 @@ def _profile_faces(profile):
     """The profile's closed shapes as faces, where the profile is (the Solid's frame): a Text's letters, a sketch's
     regions."""
     import Part
+    from incad.core import regions
+    if regions.is_profile(profile):  # an area copy: its source's own areas (two touching at a corner stay two)
+        def made(sh):
+            wires = [w for w in sh.Wires if w.isClosed()]
+            return list(Part.makeFace(wires, "Part::FaceMakerBullseye").Faces) if wires else []
+        return regions.faces_of(profile, made)
     sh = profile.Shape
     if sh.Faces:
         return list(sh.Faces)

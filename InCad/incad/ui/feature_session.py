@@ -97,6 +97,165 @@ def _feature_alive(obj):
         return False
 
 
+AREA_COLOUR, AREA_PICKED = (0.95, 0.62, 0.29), (0.25, 0.55, 0.95)
+AREA_LIFT = 0.01  # mm
+SEE_THROUGH = 60  # the preview's transparency while the areas are shown
+
+
+def _lifted(source):
+    """Where the shown areas of a sketch go: on the sketch, lifted a hair off the face it stands on (in the part's
+    face's plane they flickered in patches with it and the clicks went to the face, the user 2026-11-08), away from
+    the part: along the face's outward normal; on a plane, along the sketch's own normal."""
+    import FreeCAD as App
+    pl = source.getGlobalPlacement()
+    n = pl.Rotation.multVec(App.Vector(0, 0, 1))
+    try:
+        obj, subs = source.AttachmentSupport[0]
+        face = obj.getSubObject(subs[0]) if subs else None
+        if face is not None and face.ShapeType == "Face":
+            u0, u1, v0, v1 = face.ParameterRange
+            if face.normalAt(0.5 * (u0 + u1), 0.5 * (v0 + v1)).dot(n) < 0:
+                n = -n
+    except Exception:
+        pass
+    return App.Placement(pl.Base + n * AREA_LIFT, pl.Rotation)
+
+
+def is_area_shown(obj):
+    return obj is not None and "InCadAreaPick" in getattr(obj, "PropertiesList", ())
+
+
+class _AreaChoice:
+    """The areas of a feature's sketch, shown while its window is open (the user 2026-11-08: the window opens at
+    once, no click before it): a click on an area takes it in or leaves it out, the preview follows; ⌘A takes them
+    all. The shown faces live inside the window's undo step and are removed in it before it closes (added and
+    removed in one step, they leave nothing in it; made outside a step, FreeCAD opened one of its own and an undo
+    step was left over); a step rolled back takes them along, so they are shown again after it (ensure). The
+    preview is see-through and lets the clicks through to the areas meanwhile (a Join covered them)."""
+
+    def __init__(self, session, source, profile, faces):
+        import FreeCADGui as Gui
+        from incad.core import regions
+        self.session, self.doc, self.source, self.profile, self.faces = session, session.doc, source, profile, faces
+        self.picked = regions.picked_areas(profile, faces)
+        self.names, self._saved = [], {}
+        Gui.Selection.addObserver(self)
+        log.report("info", "%d areas: click the ones to %s" % (len(faces), session.kind.TITLE.lower()))
+
+    def ensure(self):
+        """The areas shown (again, after an undo step was rolled back: they went with it)."""
+        if self.names and all(self.doc.getObject(n) is not None for n in self.names):
+            return
+        self.names = []
+        pl = _lifted(self.source)
+        for i, f in enumerate(self.faces):
+            o = self.doc.addObject("Part::Feature", "Area%d" % (i + 1))
+            o.Label = "Area %d" % (i + 1)
+            o.addProperty("App::PropertyBool", "InCadAreaPick", "InCad", "Shown while an area is picked")
+            shape = f.copy()
+            shape.Placement = pl
+            o.Shape = shape
+            try:
+                vo = o.ViewObject
+                vo.ShapeColor = AREA_PICKED if i in self.picked else AREA_COLOUR
+                vo.Transparency = 55
+                vo.LineWidth = 1.0
+            except Exception:
+                pass
+            self.names.append(o.Name)
+        self._saved = {}  # (the rolled-back step took the preview's own looks back too)
+
+    @staticmethod
+    def make(session):
+        """The choice for this session's profile: an area copy of a sketch with several areas; else None."""
+        from incad.core import regions
+        from incad.features import common
+        prof = session.profile if session.profile is not None else (
+            common.profile_of(session.feature) if session.feature is not None else None)
+        if prof is None or not regions.is_profile(prof):
+            return None
+        source = regions.source_of(prof)
+        if source is None:
+            return None
+        faces = regions.regions(source)
+        if len(faces) < 2:
+            return None
+        return _AreaChoice(session, source, prof, faces)
+
+    def addSelection(self, doc, obj, sub, pnt):
+        if doc != self.doc.Name or obj not in self.names:
+            return
+        index = self.names.index(obj)
+        QtCore.QTimer.singleShot(0, lambda: self.session._areas is self and self.toggle(index))
+
+    def _colour(self):
+        for i, name in enumerate(self.names):
+            try:
+                self.doc.getObject(name).ViewObject.ShapeColor = AREA_PICKED if i in self.picked else AREA_COLOUR
+            except Exception:
+                pass
+
+    def toggle(self, index):
+        import FreeCADGui as Gui
+        if index in self.picked:
+            self.picked.remove(index)
+        else:
+            self.picked.append(index)
+        Gui.Selection.clearSelection()  # the next click on it counts again
+        self._colour()
+        self.session._areas_changed()
+
+    def take_all(self):
+        self.picked = list(range(len(self.faces)))
+        self._colour()
+        self.session._areas_changed()
+
+    def apply(self):
+        """The profile takes the areas picked (again after an undo step was rolled back)."""
+        from incad.core import regions
+        regions.set_areas(self.profile, [self.faces[i] for i in sorted(self.picked)], self.source)
+
+    def see_through(self, feature):
+        """The preview see-through and not picked, so the areas under it show and take the clicks."""
+        if feature is None or not _feature_alive(feature):
+            return
+        try:
+            vo = feature.ViewObject
+            if feature.Name not in self._saved:
+                self._saved[feature.Name] = (vo.Transparency, vo.Selectable)
+            if vo.Transparency != SEE_THROUGH:
+                vo.Transparency = SEE_THROUGH
+            if vo.Selectable:
+                vo.Selectable = False
+        except Exception:
+            pass
+
+    def hide(self):
+        """Inside the window's undo step, before it closes: the areas go, the preview looks as before."""
+        for name, (transparency, selectable) in self._saved.items():
+            obj = self.doc.getObject(name)
+            if obj is not None:
+                try:
+                    obj.ViewObject.Transparency = transparency
+                    obj.ViewObject.Selectable = selectable
+                except Exception:
+                    pass
+        self._saved = {}
+        for name in self.names:
+            try:
+                if self.doc.getObject(name) is not None:
+                    self.doc.removeObject(name)
+            except Exception:
+                pass
+        self.names = []
+
+    def close(self):
+        import FreeCADGui as Gui
+        try:
+            Gui.Selection.removeObserver(self)
+        except Exception:
+            pass
+
 class _Recomputed:
     """Document observer: the names of the objects a recompute computed."""
 
@@ -153,6 +312,8 @@ class FeatureSession(QtCore.QObject):
         self._markers = None       # key points of the sketches picked for Sweep/Loft, on the view
         self._saved_sketches = []  # picked sketches shown for the dialog, hidden again when it closes
         self.on_previewed = None  # callable() after each preview that worked (the shell's overlay follows)
+        self._areas = None  # the sketch's areas shown to click (_AreaChoice), while the window is open
+        self._areas_dirty = False  # areas changed while creating: the feature is made again (Auto decides again)
 
     def start(self):
         doc = self.doc
@@ -168,10 +329,17 @@ class FeatureSession(QtCore.QObject):
             App.addDocumentObserver(self._computed)
         except Exception:
             self._computed = None
+        try:
+            self._areas = _AreaChoice.make(self)
+        except Exception:
+            log.logger().exception("%s: show the areas", self.kind.TITLE)
+            self._areas = None
         self._undo_mark = doc.UndoCount  # Cancel undoes back to here: a Sketcher command run meanwhile (Delete
         if not self.creating:  # every document's undo step opens before anything changes   on a copy) makes
             self._join_documents(self.kind.read(doc, self.feature))  # FreeCAD commit the dialog's own pending step
         doc.openTransaction(self.kind.TITLE)
+        if self._areas is not None:
+            self._areas.ensure()  # inside the step (see _AreaChoice)
         safe.set_busy(self.kind.TITLE)
         try:
             if self.creating:
@@ -179,7 +347,10 @@ class FeatureSession(QtCore.QObject):
                 again = _AGAIN.pop(getattr(self.kind, "__name__", ""), None)  # Apply +: the last one's settings
                 if again:
                     values.update({k: v for k, v in again.items() if k in values})
-                if getattr(self.kind, "NEEDS_PROFILE", True):
+                if getattr(self.kind, "NEEDS_PROFILE", True) and self._areas is not None and not self._areas.picked:
+                    self.feature = None  # no area taken yet: made with the first click on one
+                    self._area_defaults = dict(values)  # decided again then (Join or Cut by where the area is)
+                elif getattr(self.kind, "NEEDS_PROFILE", True):
                     document.adopt(self.body, self.profile)  # a sketch left in another Solid comes along
                     try:
                         self.feature = self.kind.create(doc, self.body, self.profile, values)
@@ -616,6 +787,8 @@ class FeatureSession(QtCore.QObject):
                 if corners:
                     sub = self._corner_near(sel, i, sub)
                 obj, el = common.resolve(sel.Object, sub)
+                if is_area_shown(obj):
+                    continue  # a click on a shown area takes the area (_AreaChoice), it is no pick
                 own = self.dialog is not None and (self.dialog.active_pick() in getattr(self.kind, "PICKS_ON_SELF", ())
                                                    or self._previewing_picks(self.dialog.active_pick()))
                 if obj is not None and (obj is not self.feature or own or getattr(self.kind, "IN_SKETCH", False)):
@@ -1429,8 +1602,16 @@ class FeatureSession(QtCore.QObject):
         safe.watch_esc()  # Esc from now on stops a long preview (the user: Escape must cancel any operation)
         values, self._pending = self._pending, None
         self._applied = values
+        if self.creating and self._areas is not None and not self._areas.picked:
+            self._areas_dirty = False
+            if self.feature is not None:  # every area left out again: nothing to show
+                self._drop_feature(values)
+            from incad.core import regions
+            self.dialog.set_error(regions.NO_AREA[0].upper() + regions.NO_AREA[1:], waiting=True)
+            return
         try:
-            if self.creating and (self.feature is None or self._needs_recreate(values)):
+            if self.creating and (self.feature is None or self._areas_dirty or self._needs_recreate(values)):
+                self._areas_dirty = False
                 # roll back every document, then open all the undo steps again before changing anything
                 # (opening a step in one more document commits what is pending in the others)
                 self._abort_step()
@@ -1441,6 +1622,9 @@ class FeatureSession(QtCore.QObject):
                 self._join_documents(values)
                 self.doc.openTransaction(self.kind.TITLE)
                 self.feature = None  # the abort removed it; stays None if the new one fails
+                if self._areas is not None:
+                    self._areas.apply()  # the abort took the profile back to its areas before the step
+                    self._areas.ensure()  # and the shown areas with it
             if self.feature is None:
                 self._retarget_from_values(values)
                 if self.profile is not None:
@@ -1465,6 +1649,9 @@ class FeatureSession(QtCore.QObject):
         self._check()
         if self.feature is not None and _feature_alive(self.feature):
             document.show_finished(self.doc, [self.feature])  # the hole's chamfer step shows, not the bare hole
+            if self._areas is not None:
+                self._areas.ensure()
+                self._areas.see_through(self.feature)
         self._label_params()
         self._fill_empty_picks()
         self._show_adjusted()
@@ -1491,6 +1678,56 @@ class FeatureSession(QtCore.QObject):
                 self.on_previewed()
             except Exception:
                 log.logger().exception("%s overlay", self.kind.TITLE)
+
+    def _areas_changed(self):
+        """An area clicked in or out: the profile takes them and the preview follows."""
+        if self._closed or self.dialog is None or self._areas is None:
+            return
+        if self.creating:
+            self._areas_dirty = True
+        else:
+            try:
+                self._areas.apply()
+            except Exception as e:
+                self.dialog.set_error(str(e))
+                return
+        if self.creating:
+            self._areas.apply()
+            self._redo_defaults()
+        self._pending = self.dialog.values()
+        self._preview()
+
+    def _redo_defaults(self):
+        """The defaults the kind takes from its profile (Join or Cut: is the profile in the material?) decided again
+        with the first area taken: the window opened on no area yet. A value the user changed meanwhile stays."""
+        first = getattr(self, "_area_defaults", None)
+        if first is None or not self._areas.picked:
+            return
+        self._area_defaults = None
+        try:
+            self.profile.recompute()
+            again = self.kind.defaults(self.doc, self.body, self.profile)
+        except Exception:
+            return
+        now = self.dialog.values()
+        changed = {k: v for k, v in again.items() if k in now and k in first and now[k] == first[k] and v != first[k]
+                   and self.dialog.field_def(k).kind == "choice"}
+        if changed:
+            self.dialog.set_values(changed)
+
+    def _drop_feature(self, values):
+        """The feature made so far goes (its undo step rolled back and opened again), the areas stay as clicked."""
+        self._abort_step()
+        self.feature = None
+        self._abort_extras(reopen=False)
+        _recompute_sound(self.doc)
+        model.relink(self.doc)
+        self._join_documents(values)
+        self.doc.openTransaction(self.kind.TITLE)
+        if self._areas is not None:
+            self._areas.apply()
+            self._areas.ensure()
+        self.doc.recompute()
 
     def _before_thread(self):
         """A cut or join through a modeled thread breaks in the kernel: it goes before the thread, which is made after
@@ -1967,6 +2204,9 @@ class FeatureSession(QtCore.QObject):
         except Exception as e:  # whatever failed, the dialog goes: left open it ignored every button (closed)
             log.report("warning", "%s: closing the dialog: %s" % (self.kind.TITLE, e), traceback.format_exc())
         finally:
+            if self._areas is not None:
+                self._areas.close()
+                self._areas = None
             safe.set_busy(None)
             if getattr(self, "_computed", None) is not None:
                 try:
@@ -1999,6 +2239,11 @@ class FeatureSession(QtCore.QObject):
         self._sync_axis_line(False)
         self._timer.stop()  # a value edited during the last preview must not preview after the close
         self._observe(False)
+        if self._areas is not None:
+            try:
+                self._areas.hide()  # inside the step: added and removed in it, they leave nothing
+            except Exception:
+                log.logger().exception("%s: remove the shown areas", self.kind.TITLE)
         try:
             self._show_base(False)
         except Exception:

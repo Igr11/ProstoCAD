@@ -461,6 +461,7 @@ class FeatureDialog(QtWidgets.QFrame):
             b.setFocusPolicy(QtCore.Qt.NoFocus)
             b.setAutoRepeat(True)
             b.clicked.connect(lambda _=False, k=f.key, d=delta, b=b: self._arrow(b, k, d))
+            b.released.connect(lambda b=b: self._arrow_released(b))
             col.addWidget(b)
             arrows.append(b)
         row.addLayout(col)
@@ -602,11 +603,21 @@ class FeatureDialog(QtWidgets.QFrame):
         last, button._last_step = getattr(button, "_last_step", 0.0), now
         if button.isDown() and now - last > 0.6:
             button.setDown(False)
+            self._arrow_released(button)
             return
-        self._step(key, delta * (10 if button.big else 1))
+        held = button.isDown()  # an auto-repeat while held: the number only, the preview once let go (the user
+        # 2026-11-08: each repeat previewed - Emboss 0.4 s - the release came late and the number ran on by itself)
+        if self._step(key, delta * (10 if button.big else 1), preview=not held) and held:
+            button._held_key = key
         button._last_step = time.monotonic()  # the gap to the next repeat counts from the end of this one
 
-    def _step(self, key, delta):
+    def _arrow_released(self, button):
+        """The held arrow let go: the steps made while it was held preview now, once."""
+        if getattr(button, "_held_key", None) is not None:
+            button._held_key = None
+            self._emit()
+
+    def _step(self, key, delta, preview=True):
         w = self._widgets[key]
         f = self._fields[key]
         size = None
@@ -617,10 +628,13 @@ class FeatureDialog(QtWidgets.QFrame):
                 size = None
         text = step_text(w.text(), delta, f.kind, getattr(f, "signed", False), size)
         if text is None or text == w.text():
-            return
+            return False
         self._type_timer.stop()
         w.setText(text)
-        self._emit()  # one preview per press, no waiting for the typing pause
+        self._type_timer.stop()  # (the text change started it: no preview of its own while the arrow is held)
+        if preview:
+            self._emit()  # one preview per press, no waiting for the typing pause
+        return True
 
     def step_buttons(self, key):
         """(up, down) arrow buttons of a value field (tests)."""

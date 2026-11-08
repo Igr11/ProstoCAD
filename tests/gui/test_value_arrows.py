@@ -56,6 +56,34 @@ def test_1_each_press_previews_at_once():
     assert dialog().field("distance").text() == "20 mm" and abs(feature().Length.Value - 20) < 1e-6
 
 
+def test_1b_a_held_arrow_previews_once_let_go():
+    """Held, the arrow steps the number only; the preview comes once it is let go (the user 2026-11-08: a slow
+    preview on every repeat held the window up, the release came late and the number ran on by itself)."""
+    up, _down = dialog().step_buttons("distance")
+    w = dialog().field("distance")
+    start = float(w.text().split()[0])
+    length = feature().Length.Value
+    import time
+    up.big = False  # (no Shift: the Shift-click before left it set)
+    up.setDown(True)  # held: Qt's own auto-repeat clicks it now, and so do these
+    for _ in range(3):
+        up._last_step = time.monotonic()  # (repeats come quickly: no stuck button)
+        dialog()._arrow(up, "distance", 1)
+    harness.pump(900)
+    up.setDown(False)
+    held = float(w.text().split()[0])
+    assert held >= start + 3, w.text()
+    assert abs(feature().Length.Value - length) < 1e-6, "no preview while held"
+    up.released.emit()
+    harness.pump(600)
+    assert abs(feature().Length.Value - held) < 1e-6, (feature().Length.Value, held)
+    w.setText("%g mm" % (start + 1))  # back to where test_2's undo expects the presses (21 mm, then 20 mm)
+    harness.pump(900)
+    QTest.mouseClick(_down, QtCore.Qt.LeftButton)
+    harness.pump(400)
+    assert w.text() == "%g mm" % start and abs(feature().Length.Value - start) < 1e-6, w.text()
+
+
 def test_2_undo_in_the_dialog_walks_the_presses_back():
     commands.REGISTRY.run("edit.undo")
     harness.pump(500)
@@ -83,5 +111,5 @@ def test_3_a_formula_greys_the_arrows_and_ok_keeps_the_value():
     assert abs(pad.Length.Value - 16) < 1e-6, pad.Length.Value
 
 
-harness.run([test_0_setup_and_open_extrude, test_1_each_press_previews_at_once,
+harness.run([test_0_setup_and_open_extrude, test_1_each_press_previews_at_once, test_1b_a_held_arrow_previews_once_let_go,
              test_2_undo_in_the_dialog_walks_the_presses_back, test_3_a_formula_greys_the_arrows_and_ok_keeps_the_value])

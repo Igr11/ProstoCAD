@@ -111,9 +111,10 @@ class ExtrudeFeature:
         from incad.core import extrude_solid
         from incad.features.common import profile_of
         sk = profile_of(obj)
-        if sk is None or sk.Shape.isNull():
+        if sk is None:
             raise ValueError("the Extrude has no profile")
-        faces = extrude_solid.profile_faces(sk.Shape)
+        from incad.core import regions
+        faces = regions.faces_of(sk, extrude_solid.profile_faces)
         origin, n = sk.Placement.Base, _normal(sk)
         d = -n if obj.Reversed else n
         base = _material(obj)
