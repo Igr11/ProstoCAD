@@ -4388,6 +4388,9 @@ class Shell(QtCore.QObject):
                 if abs(scale.scaleFactor.getValue() - self.PADLOCK_SCALE) > 1e-6:
                     scale.scaleFactor = self.PADLOCK_SCALE
                 proxy.lockpadColor.rgb.setValue(c.redF(), c.greenF(), c.blueF())
+                from pivy import coin  # the padlock is only a mark (the user): a click goes through it to the part
+                if proxy.pick.style.getValue() != coin.SoPickStyle.UNPICKABLE:
+                    proxy.pick.style = coin.SoPickStyle.UNPICKABLE
             except Exception:
                 pass
             self._lock_on_part(j, proxy)
