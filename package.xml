@@ -2,7 +2,7 @@
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
   <name>InCad</name>
   <description>ProstoCAD for FreeCAD (formerly InCad): parametric parts and assemblies for 3D printing - an Inventor/Alibre-style ribbon, Model Browser, marking menus, sketch patterns, assemblies.</description>
-  <version>0.17.0</version>
+  <version>0.17.5</version>
   <date>2026-11-01</date>
   <maintainer email="83518921+Igr11@users.noreply.github.com">Igr11</maintainer>
   <license file="LICENSE">LGPL-2.1-or-later</license>
