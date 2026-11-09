@@ -104,14 +104,17 @@ class MarkingMenu(QtWidgets.QWidget):
         return b
 
     # ----- public -----
-    def show_at(self, global_pos):
+    def show_at(self, global_pos, left=None):
         """Open the ring around the point pressed; near an edge of the screen the menu is shifted to stay whole,
-        and the gesture is still measured from the point pressed."""
+        and the gesture is still measured from the point pressed. left: the tree's right edge (global x), the
+        menu never covers the tree (a right-click on a tree row opens it beside the tree, at the row's height)."""
         self._anchor = QtCore.QPoint(global_pos)
         top_left = global_pos - self._center
         screen = QtGui.QGuiApplication.screenAt(global_pos) or QtGui.QGuiApplication.primaryScreen()
         if screen is not None:
             area = screen.availableGeometry()
+            if left is not None:
+                area.setLeft(max(area.left(), left))
             x = min(max(top_left.x(), area.left()), max(area.left(), area.right() - self.width() + 1))
             y = min(max(top_left.y(), area.top()), max(area.top(), area.bottom() - self.height() + 1))
             top_left = QtCore.QPoint(x, y)

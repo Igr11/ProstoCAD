@@ -81,6 +81,7 @@ class _DocObserver:
     def slotCreatedDocument(self, doc):
         self.callback()
 
+
     def slotDeletedDocument(self, doc):
         self.callback()
         if self.delete_callback is not None:
@@ -91,6 +92,8 @@ class _DocObserver:
 
     def slotActivateDocument(self, doc):
         self.callback()
+        name = doc.Name
+        QtCore.QTimer.singleShot(0, lambda: _warn_lost_parts(name))  # an assembly opened (or come to): a lost part said
         if self.activate_callback is not None:
             self.activate_callback(doc)
 
@@ -133,6 +136,31 @@ class _DocObserver:
                or o.TypeId in safe._LINKED or "InCadThroughAllReach" in o.PropertiesList  # holes, threads, hollow
                for o in getattr(doc, "Objects", ())):  # sweeps, tapered Through All, dress-ups: measured again
             QtCore.QTimer.singleShot(0, lambda d=doc: _follow_holes(d))
+
+
+_LOST_SAID = {}  # assembly document name -> (file, lost parts) last said
+
+
+def _warn_lost_parts(name):
+    """An assembly opened with a part whose file is not found: said once (the user: the part was silently gone
+    from the assembly, and a save kept it so); said again only when the lost parts change."""
+    import FreeCAD as App
+    try:
+        doc = App.getDocument(name)
+    except Exception:
+        return
+    try:
+        from incad.core import assembly, pack
+        if assembly.is_assembly(doc):
+            gone = pack.lost(doc)
+            key = (doc.FileName, tuple(gone))
+            if gone and _LOST_SAID.get(name) != key:
+                _LOST_SAID[name] = key
+                log.report("warning", "%s: %s" % (doc.Label, pack.lost_words(gone)))
+            elif not gone:
+                _LOST_SAID.pop(name, None)
+    except Exception:
+        log.logger().exception("lost parts")
 
 
 def _follow_axes_later(sk):
@@ -1282,10 +1310,24 @@ class Shell(QtCore.QObject):
         menu = MarkingMenu(self.registry, slots, items, self.theme, self.mw, extras=extras)
         menu.destroyed.connect(lambda _=None: setattr(self, "marking_menu", None))
         self.marking_menu, self.menu_kind = menu, kind
-        menu.show_at(global_pos)
+        menu.show_at(global_pos, self._tree_edge())
         if flick:
             menu.start_flick()
         return menu
+
+    def _tree_edge(self):
+        """Global x just right of the model tree when it is shown on the window's left: the right-click menu
+        stays off it."""
+        try:
+            b = self.browser
+            if b is None or not b.isVisible() or self.mw is None:
+                return None
+            right = b.mapToGlobal(QtCore.QPoint(b.width(), 0)).x()
+            if right > self.mw.mapToGlobal(self.mw.rect().center()).x():
+                return None  # the tree is docked on the right (or floats there): nothing to keep clear on the left
+            return right + 4
+        except RuntimeError:
+            return None
 
     def _open_marking_menu(self, view, viewport, local, global_pos, flick):
         import FreeCAD as App
@@ -4348,6 +4390,27 @@ class Shell(QtCore.QObject):
                 proxy.lockpadColor.rgb.setValue(c.redF(), c.greenF(), c.blueF())
             except Exception:
                 pass
+            self._lock_on_part(j, proxy)
+
+    @staticmethod
+    def _lock_on_part(j, proxy):
+        """The padlock on the grounded part itself, on the middle of its top under the word Grounded (the user: it
+        stood by the other, free part). FreeCAD puts it at the part's box centre once, when it is grounded, and
+        leaves it there when the part moves or gets its shape later."""
+        part = getattr(j, "ObjectToGround", None)
+        transform = getattr(proxy, "transform", None)
+        if part is None or transform is None:
+            return
+        try:
+            bb = part.Shape.BoundBox
+            if not bb.isValid():
+                return
+            at = (bb.Center.x, bb.Center.y, bb.ZMax)
+            now = transform.translation.getValue().getValue()
+            if max(abs(a - b) for a, b in zip(now, at)) > 1e-6:
+                transform.translation.setValue(*at)
+        except Exception:
+            pass
 
     def _on_plane_picked(self, role):
         try:
@@ -4594,7 +4657,18 @@ class Shell(QtCore.QObject):
             return []
         body = document.primary_body(doc)
         if body is not None and not body.Shape.isNull() and body.Shape.Solids:
-            return [(self._section_shape(body), self._part_colour(body))]
+            # every shown Solid cut on its own, in its own colour (the user 2026-11-09): Solids that touch (a lid on
+            # its housing), cut as one, had their outlines run together into one wrong face, and the cut showed hollow
+            out = []
+            for b in document.bodies(doc):
+                try:
+                    if b.Shape.isNull() or not b.Shape.Solids or not document.is_shown(b):
+                        continue
+                except Exception:
+                    continue
+                colour = self._part_colour(b)
+                out += [(solid, colour) for solid in b.Shape.Solids]
+            return out or [(self._section_shape(body), self._part_colour(body))]
         return [(shape, self._part_colour(colour_of)) for _, shape, colour_of in section.shown_shapes(doc)]
 
     @staticmethod

@@ -9,6 +9,36 @@ def _plural(n, word):
     return "%d %s%s" % (n, word, "" if n == 1 else "s")
 
 
+class _Elided(QtWidgets.QLabel):
+    """A label that never widens the window: a text longer than its room is cut with … (the whole of it in the tip).
+    A long message (a save failed, with the file's path) pushed the window's right side off the screen (the user)."""
+
+    def __init__(self, text=""):
+        super().__init__(text)
+        self._full = text
+        self.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Preferred)
+        self.setMinimumWidth(40)
+
+    def setText(self, text):
+        self._full = text or ""
+        self._fit()
+
+    def text(self):
+        return self._full
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
+
+    def _fit(self):
+        shown = self.fontMetrics().elidedText(self._full, QtCore.Qt.ElideRight, max(0, self.width() - 2))
+        QtWidgets.QLabel.setText(self, shown)
+
+    def sizeHint(self):
+        h = super().sizeHint()
+        return QtCore.QSize(min(h.width(), self.fontMetrics().horizontalAdvance(self._full) + 4), h.height())
+
+
 class StatusBar(QtWidgets.QWidget):
     dofClicked = Signal()
 
@@ -20,12 +50,12 @@ class StatusBar(QtWidgets.QWidget):
         row = QtWidgets.QHBoxLayout(self)
         row.setContentsMargins(4, 2, 4, 2)
         self._prompt = QtWidgets.QLabel("")
-        self._message = QtWidgets.QLabel("")
+        self._message = _Elided("")
         self._units = QtWidgets.QLabel("")
         self._dof = QtWidgets.QLabel("")
         self._stats = QtWidgets.QLabel("")
         row.addWidget(self._prompt)
-        row.addWidget(self._message)
+        row.addWidget(self._message, 100)  # it takes the room there is, never more (cut with …)
         row.addStretch(1)
         for w in (self._units, self._dof, self._stats):
             row.addWidget(w)

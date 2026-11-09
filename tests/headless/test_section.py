@@ -227,3 +227,33 @@ class HatchTest(unittest.TestCase):
             self.assertLess(max(a.Length, b.Length), 50.0 + 1e-6)
             d = b - a
             self.assertAlmostEqual(d.x, d.y, places=6)
+
+
+class TouchingSolidsTest(unittest.TestCase):
+    """A part of Solids that touch (a lid on its housing): cut as one, their outlines ran together into one wrong
+    face and the section showed hollow (the user 2026-11-09). Each Solid is cut on its own now."""
+
+    def setUp(self):
+        from incad.core import document
+        self.doc = util.new_doc("Touch")
+        body, _pad = util.padded_part(self.doc, 10, incad=True)  # 20 x 10 x 10, z 0..10
+        lid = document.new_solid(self.doc)
+        sk = util.add_rect_sketch(lid)
+        pad = util.add_pad(lid, sk, 4)
+        lid.Tip = pad
+        lid.Placement = App.Placement(App.Vector(0, 0, 10), App.Rotation())  # on top of the first: they touch
+        self.doc.recompute()
+        self.solids = (body, lid)
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def test_each_solid_gets_its_own_cut(self):
+        from incad.ui import shell
+        targets = shell.Shell._section_targets(shell.Shell, self.doc)
+        self.assertEqual(len(targets), 2)
+        mid = self.solids[0].Shape.BoundBox.Center
+        plane = App.Placement(mid, App.Rotation(App.Vector(1, 0, 0), 90))  # the XZ plane through the middle
+        areas = sorted(sum(f.Area for f in section.Caps(sh).faces(plane)) for sh, _colour in targets)
+        self.assertAlmostEqual(areas[0], 20 * 4, delta=0.5)
+        self.assertAlmostEqual(areas[1], 20 * 10, delta=0.5)

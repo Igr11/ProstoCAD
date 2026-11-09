@@ -88,6 +88,18 @@ def test_1b_padlock_is_small_and_calm():
     grounded = [c for c in assembly.components(asm_doc()) if assembly.is_grounded(c)][0]
     bb = grounded.Shape.BoundBox
     assert abs(at[0] - bb.Center.x) < 1e-3 and abs(at[1] - bb.Center.y) < 1e-3 and at[2] > bb.ZMax, (at, bb)
+    # FreeCAD's padlock on the part too, on the middle of its top (the user: it stood by the free part)
+    grounded.Placement = App.Placement(grounded.Placement.Base + App.Vector(15, 0, 0), grounded.Placement.Rotation)
+    asm_doc().recompute()
+    s().schedule_refresh()
+    harness.pump(600)
+    bb = grounded.Shape.BoundBox
+    lock = proxy.transform.translation.getValue().getValue()
+    assert abs(lock[0] - bb.Center.x) < 1e-3 and abs(lock[1] - bb.Center.y) < 1e-3 and abs(lock[2] - bb.ZMax) < 1e-3, \
+        (lock, bb)
+    grounded.Placement = App.Placement(grounded.Placement.Base - App.Vector(15, 0, 0), grounded.Placement.Rotation)
+    asm_doc().recompute()
+    harness.pump(300)
 
 
 def test_2_mate_from_3d_picks_is_one_undo_step_and_undo_restores():
@@ -98,6 +110,8 @@ def test_2_mate_from_3d_picks_is_one_undo_step_and_undo_restores():
     Gui.Selection.clearSelection()
     commands.REGISTRY.run("constrain.mate")
     harness.pump(800)
+    fs = s().feature_session
+    assert fs is not None and not fs.dialog.apply_button.isVisible(), "no Apply + in the assembly's windows (the user)"
     asm = assembly.assembly_of(doc)
     Gui.Selection.addSelection(doc.Name, asm.Name, "%s.Face%d" % (a.Name, face(a, 10)))
     harness.pump(600)

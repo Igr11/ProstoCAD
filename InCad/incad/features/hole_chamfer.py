@@ -158,6 +158,9 @@ def of(hole):
 def _remove(doc, body, hole, g):
     if body.Tip is g:
         body.Tip = hole
+    if g.Visibility:  # the chamfer was what showed the hole (document.show_finished): the hole shows again, or the part
+        from incad.core import document  # was gone from the screen while the Hole window was open (Counterbore,
+        document._set_visible(hole, True)  # Chamfer None: the user)
     body.removeObject(g)
     doc.removeObject(g.Name)
 

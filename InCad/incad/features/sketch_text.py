@@ -22,6 +22,8 @@ FIELDS = (
     Field("size", "Size", "value_length", default="5 mm", show_if=("fit", (False,))),
     Field("mode", "Placement", "choice", (("box", "In a box"), ("curve", "Along a curve")), "box"),
     Field("box", "Box", "pick", pick="sketch_box", show_if=("mode", ("box",))),
+    Field("frame", "Frame", "choice", (("rect", "Rectangle"), ("ellipse", "Ellipse"), ("circle", "Circle")), "rect",
+          show_if=("mode", ("box",))),
     Field("halign", "Horizontal", "choice", (("left", "Left"), ("center", "Centre"), ("right", "Right")), "center",
           show_if=("mode", ("box",))),
     Field("valign", "Vertical", "choice", (("top", "Top"), ("middle", "Middle"), ("bottom", "Bottom")), "middle",
@@ -30,10 +32,10 @@ FIELDS = (
     Field("curve", "Curve", "pick", pick="sketch_curve", show_if=("mode", ("curve",))),
     Field("position", "Position", "choice", (("start", "Start"), ("center", "Centre"), ("end", "End")), "center",
           show_if=("mode", ("curve",))),
-    Field("shift", "Shift", "value_length", default="0 mm", show_if=("mode", ("curve",))),
-    Field("distance", "Distance", "value_length", default="0 mm", show_if=("mode", ("curve",))),
+    Field("shift", "Shift", "value_length", default="0 mm", show_if=("mode", ("curve",)), signed=True),
+    Field("distance", "Distance", "value_length", default="0 mm", show_if=("mode", ("curve",)), signed=True),
     Field("flip", "Flip side", "bool", default=False, show_if=("mode", ("curve",))),
-    Field("spacing", "Letter spacing", "value_length", default="0 mm"),
+    Field("spacing", "Letter spacing", "value_length", default="0 mm", signed=True),
 )
 PROPS = {"size": "Size", "spacing": "Spacing", "shift": "Shift", "distance": "Distance"}
 _UNITS = {"size": "length", "spacing": "length", "shift": "length", "distance": "length"}
@@ -150,6 +152,75 @@ def _make_box(sk, a, b):
     return [sk.getGeometryId(i) for i in ids]
 
 
+def _make_round(sk, box, frame):
+    """The round frame drawn in the box (construction, dashed like it): an ellipse touching its sides, or a circle
+    as wide as its shorter side, its centre in the box's middle, held to the box's lines so it follows the corners.
+    Returns the geometry ids it added (the curve and its axes), or [] if the box is gone."""
+    import Part
+    import Sketcher
+    from incad.core import sketch_text as st
+    idx = [_geo(sk, {"id": i}) for i in box]
+    corners = _corners(sk, box)
+    if corners is None or any(i is None for i in idx):
+        return []
+    centre, u, v, width, height = st.box_frame(corners)
+    before = sk.GeometryCount
+    if frame == "circle":
+        geo = Part.Circle(centre, App.Vector(0, 0, 1), min(width, height) / 2.0)
+    else:
+        a, b = (u, v) if width >= height else (v, u)
+        big, small = max(width, height) / 2.0, min(width, height) / 2.0
+        geo = Part.Ellipse(centre + a * big, centre + b * small, centre)
+    g = sk.addGeometry(geo, True)
+    # the centre halfway between two opposite corners
+    first = sk.Geometry[idx[0]].StartPoint
+    far = sk.Geometry[idx[2]]
+    pos = 1 if (far.StartPoint - first).Length > (far.EndPoint - first).Length else 2
+    sk.addConstraint(Sketcher.Constraint("Symmetric", idx[0], 1, idx[2], pos, g, 3))
+
+    def along(i, d):  # the box line i runs along the direction d
+        line = sk.Geometry[i]
+        e = line.EndPoint - line.StartPoint
+        return e.Length > 1e-9 and abs(e.normalize().dot(d)) > 0.7
+
+    lines_u = [i for i in idx if along(i, u)]
+    lines_v = [i for i in idx if along(i, v)]
+    if frame == "circle":
+        sk.addConstraint(Sketcher.Constraint("Tangent", g, (lines_u if width >= height else lines_v)[0]))
+    else:
+        sk.exposeInternalGeometry(g)
+        axes = [i for i in range(before + 1, sk.GeometryCount) if sk.Geometry[i].TypeId == "Part::GeomLineSegment"]
+        major = max(axes, key=lambda i: sk.Geometry[i].length())
+        sk.addConstraint(Sketcher.Constraint("Parallel", major, (lines_u if width >= height else lines_v)[0]))
+        sk.addConstraint(Sketcher.Constraint("Tangent", g, lines_u[0]))
+        sk.addConstraint(Sketcher.Constraint("Tangent", g, lines_v[0]))
+    return [sk.getGeometryId(i) for i in range(before, sk.GeometryCount)]
+
+
+def _drop_round(sk, ids):
+    """The round frame taken out of the sketch (with its axes)."""
+    idx = sorted({i for i in (_geo(sk, {"id": x}) for x in ids or []) if i is not None}, reverse=True)
+    if idx:
+        sk.delGeometries(idx)
+
+
+def _round_frame(sk, s, box, mode, frame):
+    """The sketch shows the round frame chosen (Ellipse / Circle) the moment it is chosen; Rectangle or Along a
+    curve takes it away. Kept in the text's settings as `round`: its kind, its box and its geometry ids."""
+    want = mode == "box" and frame in ("ellipse", "circle") and bool(box)
+    old = s.get("round") or {}
+    have = old and all(_geo(sk, {"id": x}) is not None for x in old.get("ids") or [])
+    if want and have and old.get("frame") == frame and old.get("box") == list(box):
+        return
+    if old:
+        _drop_round(sk, old.get("ids"))
+        s.pop("round", None)
+    if want:
+        ids = _make_round(sk, list(box), frame)
+        if ids:
+            s["round"] = {"frame": frame, "box": list(box), "ids": ids}
+
+
 def _edge(sk, geo):
     g = sk.Geometry[geo] if geo >= 0 else sk.ExternalGeo[-geo - 1]
     return g.toShape()
@@ -194,7 +265,8 @@ class TextFeature:
             if corners is None:
                 raise ValueError("The text's box is gone: pick a box (four lines) or draw one")
             faces = st.in_box(words, path, size, corners, s.get("halign") or "center", s.get("valign") or "middle",
-                              obj.Spacing.Value, fit=bool(s.get("fit")), mirror=bool(s.get("mirror")))
+                              obj.Spacing.Value, fit=bool(s.get("fit")), mirror=bool(s.get("mirror")),
+                              frame=s.get("frame") or "rect")
         else:  # a text made before the box: at its point
             ref = s.get("point")
             geo = _geo(sk, ref)
@@ -284,9 +356,11 @@ def _apply(doc, f, sk, values):
         raise ValueError("The font %s is not installed on this computer" % family)
     s.update(text=values.get("text") or "", font=family, bold=bool(values.get("bold")),
              italic=bool(values.get("italic")), mirror=bool(values.get("mirror")), mode=mode,
+             frame=values.get("frame") or "rect",
              halign=values.get("halign") or "center",
              valign=values.get("valign") or "middle", fit=bool(values.get("fit")),
              position=values.get("position") or "center", flip=bool(values.get("flip")), box=box, curve=curve)
+    _round_frame(sk, s, box, mode, s["frame"])
     setattr(f, MARK, json.dumps(s, ensure_ascii=False))
     for key, prop in PROPS.items():
         default = next(x.default for x in FIELDS if x.key == key)
@@ -328,7 +402,7 @@ def read(doc, f):
     sk = f.Sketch
     values = {x.key: x.default for x in FIELDS}
     values.update({k: v for k, v in s.items() if k in ("text", "font", "bold", "italic", "mirror", "mode", "halign",
-                                                        "valign", "fit", "position", "flip")})
+                                                        "valign", "fit", "position", "flip", "frame")})
     if values.get("mode") not in ("box", "curve"):
         values["mode"] = "box"  # a text made at a point (before the box): pick or draw a box for it
     sub = _sub(sk, s.get("curve")) if sk is not None and s.get("curve") else ""

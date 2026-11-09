@@ -86,6 +86,23 @@ def test_2_save_again_keeps_it_there():
     assert not os.path.exists(os.path.join(ST["folder"], "Gear")), "a folder in the folder"
 
 
+def test_2b_a_part_file_gone_from_the_folder_is_written_again():
+    """The user: "Save failed: No such file or directory: …/Solid1.FCStd" — a part counted in the folder whose file
+    is not there: it is written there anew, the save goes through."""
+    g = App.ParamGet("User parameter:BaseApp/Preferences/Document")  # backups on, as the user has them (.FCBak):
+    g.SetBool("CreateBackupFiles", True)  # FreeCAD's save backs the old file up first, and failed when it was gone
+    g.SetBool("UseFCBakExtension", True)
+    g.SetInt("CountBackupFiles", 1)
+    doc = App.getDocument(ST["asm"])
+    pin = os.path.join(ST["folder"], "Pin.FCStd")
+    os.remove(pin)
+    Gui.getDocument(doc.Name).Modified = True
+    r = commands.REGISTRY.run("file.save")
+    harness.pump(600)
+    assert getattr(r, "ok", True), getattr(r, "error", "")
+    assert os.path.exists(pin), os.listdir(ST["folder"])
+
+
 def test_3_opened_again_it_finds_its_parts_there():
     for n in list(App.listDocuments()):
         App.closeDocument(n)
@@ -98,6 +115,43 @@ def test_3_opened_again_it_finds_its_parts_there():
     assert all(not l.Shape.isNull() for l in assembly.components(doc))
 
 
+def test_4_a_lost_part_is_said_on_open_and_no_save_drops_it():
+    """The user: an assembly whose part file is gone opened with the part silently missing, and a save kept it so.
+    Now opening says which part is lost, and Save refuses with the same words."""
+    import shutil
+    from incad.core import log
+    for n in list(App.listDocuments()):
+        App.closeDocument(n)
+    harness.pump(500)
+    pin = os.path.join(ST["folder"], "Pin.FCStd")
+    away = pin + ".away"
+    shutil.move(pin, away)
+    said = []
+    real = log.report
+    log.report = lambda level, text, *a, **k: (said.append((level, text)), real(level, text, *a, **k))[1]
+    try:
+        from incad.qt import QtCore
+        closer = QtCore.QTimer()  # a window FreeCAD may put up about the missing file: closed, as a user would
+        closer.timeout.connect(harness._close_modals)
+        closer.start(300)
+        doc = App.openDocument(os.path.join(ST["folder"], "Gear.FCStd"))
+        harness.pump(2000)
+        closer.stop()
+        assert any(lv == "warning" and "Pin" in t and "missing" in t for lv, t in said), said
+        Gui.getDocument(doc.Name).Modified = True
+        r = commands.REGISTRY.run("file.save")
+        harness.pump(600)
+        assert not getattr(r, "ok", True) and "missing" in getattr(r, "error", ""), (getattr(r, "ok", None),
+                                                                                      getattr(r, "error", ""))
+        assert not os.path.exists(pin), "the assembly was saved without its part"
+    finally:
+        log.report = real
+        for n in list(App.listDocuments()):
+            App.closeDocument(n)
+        harness.pump(300)
+        shutil.move(away, pin)
+
+
 def test_9_cleanup():
     for n in list(App.listDocuments()):
         App.closeDocument(n)
@@ -105,4 +159,6 @@ def test_9_cleanup():
 
 
 harness.run([test_0_an_assembly_of_parts_from_elsewhere, test_1_save_as_makes_the_folder_with_every_part,
-             test_2_save_again_keeps_it_there, test_3_opened_again_it_finds_its_parts_there, test_9_cleanup])
+             test_2_save_again_keeps_it_there, test_2b_a_part_file_gone_from_the_folder_is_written_again,
+             test_3_opened_again_it_finds_its_parts_there,
+             test_4_a_lost_part_is_said_on_open_and_no_save_drops_it, test_9_cleanup])

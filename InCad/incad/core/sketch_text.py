@@ -141,12 +141,95 @@ def _faces(wires):
         return [Part.Face(w) for w in ws]
 
 
+CORNER_DEG = 10.0  # a turn sharper than this between two pieces of a letter's outline is a corner of the letter
+
+
+def _points_of(edges):
+    """Points along pieces of an outline, one after another, each piece the way the chain runs."""
+    pts = []
+    for e in edges:
+        n = max(12, min(60, int(e.Length / 0.01)))
+        p = e.discretize(Number=n)
+        if pts and (p[-1] - pts[-1]).Length < (p[0] - pts[-1]).Length:
+            p = p[::-1]
+        elif not pts and len(edges) > 1:
+            nxt = edges[1]
+            ends = [v.Point for v in nxt.Vertexes]
+            if min((p[0] - q).Length for q in ends) < min((p[-1] - q).Length for q in ends):
+                p = p[::-1]
+        pts += p[1:] if pts else p
+    return pts
+
+
+def _smooth_wire(w):
+    """A letter's outline with the pieces between two corners made into one smooth curve (the font gives a piece
+    per arc of the letter: each became a wall of its own, with a seam between, in Extrude and Emboss). Corners
+    stay sharp; a round outline with no corner (an O) is one closed curve."""
+    es = w.OrderedEdges
+    if len(es) < 2:
+        return w
+
+    def turn(a, b):  # the angle where a ends and b starts, in degrees
+        pa, pb = [v.Point for v in a.Vertexes], [v.Point for v in b.Vertexes]
+        i, j = min(((i, j) for i in range(len(pa)) for j in range(len(pb))), key=lambda ij: (pa[ij[0]] - pb[ij[1]]).Length)
+        ta = a.tangentAt(a.FirstParameter if i == 0 else a.LastParameter)
+        tb = b.tangentAt(b.FirstParameter if j == 0 else b.LastParameter)
+        if ta.Length < 1e-12 or tb.Length < 1e-12:
+            return 180.0
+        ang = math.degrees(ta.getAngle(tb))
+        return min(ang, 180.0 - ang)
+
+    sharp = [turn(es[k], es[(k + 1) % len(es)]) > CORNER_DEG for k in range(len(es))]  # after piece k
+    try:
+        if not any(sharp):  # no corner: one closed smooth curve
+            pts = _points_of(es)[:-1]
+            c = Part.BSplineCurve()
+            c.interpolate(pts, PeriodicFlag=True)
+            return Part.Wire([c.toShape()])
+        k0 = sharp.index(True) + 1  # start just after a corner
+        order = es[k0:] + es[:k0]
+        flags = sharp[k0:] + sharp[:k0]
+        runs, cur = [], []
+        for e, corner in zip(order, flags):
+            cur.append(e)
+            if corner:
+                runs.append(cur)
+                cur = []
+        if cur:
+            runs.append(cur)
+        out = []
+        for run in runs:
+            if len(run) == 1:
+                out.append(run[0])
+                continue
+            pts = _points_of(run)
+            c = Part.BSplineCurve()
+            c.interpolate(pts)
+            out.append(c.toShape())
+        made = Part.Wire(out)
+        return made if made.isClosed() else w
+    except Exception:
+        return w
+
+
+def _smooth(faces):
+    out = []
+    for f in faces:
+        try:
+            made = Part.makeFace([_smooth_wire(w) for w in f.Wires], "Part::FaceMakerBullseye").Faces
+            ok = len(made) == 1 and made[0].isValid() and abs(made[0].Area - f.Area) <= 0.002 * f.Area
+            out += made if ok else [f]
+        except Exception:
+            out.append(f)
+    return out
+
+
 def _glyph(path, char):
     """(faces of one letter at FreeCAD height 1, its advance width at height 1): the advance is where the next
     letter would start, measured with a marker letter after it (FreeCAD gives no metrics)."""
     key = (path, char)
     if key not in _glyphs:
-        faces = _faces(_wires(char, path, 1.0)[0]) if char.strip() else []
+        faces = _smooth(_faces(_wires(char, path, 1.0)[0])) if char.strip() else []
         mark = _wires("I", path, 1.0)
         pair = _wires(char + "I", path, 1.0)
         try:
@@ -174,6 +257,80 @@ def _scaled(faces, s, mat=None):
         if mat is not None:
             g.transformShape(mat)
         out.append(g)
+    return out
+
+
+def _merged(faces):
+    """Letters that lie over each other (a tight spacing, a script font) as one outline: no wall inside where they
+    join; letters apart stay apart, each with its holes."""
+    if len(faces) < 2:
+        return faces
+    owner = list(range(len(faces)))  # letters that really overlap (not only their boxes, as round a curve) join
+
+    def root(i):
+        while owner[i] != i:
+            owner[i] = owner[owner[i]]
+            i = owner[i]
+        return i
+
+    boxes = [f.BoundBox for f in faces]
+    for i in range(len(faces)):
+        for j in range(i + 1, len(faces)):
+            if root(i) == root(j) or not boxes[i].intersect(boxes[j]):
+                continue
+            try:
+                if faces[i].common(faces[j]).Area > 1e-9:
+                    owner[root(j)] = root(i)
+            except Exception:
+                pass
+    groups = {}
+    for i in range(len(faces)):  # in the letters' order (the first letter of each group)
+        groups.setdefault(root(i), [[], None])[0].append(faces[i])
+    groups = list(groups.values())
+    out = []
+    for group, _b in groups:
+        if len(group) == 1:
+            out += group
+            continue
+        try:  # the fused pieces' outer edges (an edge two pieces share is inside), made into faces again: the
+            # fuse alone leaves the joined letters cut into pieces, and removeSplitter does not join them in a plane
+            pieces = group[0].fuse(group[1:]).Faces
+            uses = {}
+            for f in pieces:
+                for e in f.Edges:
+                    uses.setdefault(e.hashCode(), [e, 0])[1] += 1
+            edges = [e for e, n in uses.values() if n == 1]
+            wires = [Part.Wire(es) for es in Part.sortEdges(edges)]
+            made = [f for f in Part.makeFace(wires, "Part::FaceMakerBullseye").Faces if f.Area > 1e-12]
+            out += made if made and all(f.isValid() for f in made) else group
+        except Exception:
+            out += group
+    return out
+
+
+def _warped_edge(edge, fn):
+    """The edge moved point by point through fn (x, y) -> (x, y): a smooth curve through its moved points, its ends
+    exactly on the moved ends (the corners of the letter stay sharp)."""
+    n = max(8, int(edge.Length / 0.02)) if edge.Length > 0 else 8
+    n = min(n, 200)
+    pts = [App.Vector(*fn(p.x, p.y), 0) for p in edge.discretize(Number=n + 1)]
+    c = Part.BSplineCurve()
+    c.interpolate(pts)
+    return c.toShape()
+
+
+def _warped(faces, fn):
+    """The faces moved point by point through fn (their outlines rebuilt as smooth curves)."""
+    out = []
+    for f in faces:
+        wires = []
+        for w in f.Wires:
+            edges = [_warped_edge(e, fn) for e in w.OrderedEdges]
+            wires.append(Part.Wire(edges))
+        try:
+            out += list(Part.makeFace(wires, "Part::FaceMakerBullseye").Faces)
+        except Part.OCCError:
+            out += [Part.Face(w) for w in wires]
     return out
 
 
@@ -211,7 +368,7 @@ def at_point(text, path, size, anchor=(0.0, 0.0), align="left", angle=0.0, spaci
     m = move.multiply(rot)
     for f in out:
         f.transformShape(m)
-    return out
+    return _merged(out)
 
 
 def box_frame(corners):
@@ -234,12 +391,14 @@ def box_frame(corners):
 
 
 def in_box(text, path, size, corners, halign="center", valign="middle", spacing=0.0, line_spacing=1.5, fit=False,
-           mirror=False):
+           mirror=False, frame="rect"):
     """Faces of the text inside a box (four corners, in sketch coordinates): each line aligned left / centre /
     right across it, the block of lines top / middle / bottom in it, the capital letters `size` tall. fit: the
     letters scaled so the widest line fills the box's width (never taller than the box). Longer than the box:
     the text runs past it (Inventor). mirror: flipped left-right in the box, to read from the plane's other side
-    (left / right then mean as seen from there)."""
+    (left / right then mean as seen from there). frame: "rect" the box itself; "ellipse" the ellipse in the box,
+    "circle" the circle in it (as wide as the box's shorter side): the text stands in the rectangle inside the round
+    frame, or with fit takes the frame's shape, each letter as high as the frame is where it stands."""
     centre, u, v, width, height = box_frame(corners)
     if width < 1e-6 or height < 1e-6:
         raise ValueError("The text box has no size")
@@ -247,6 +406,20 @@ def in_box(text, path, size, corners, halign="center", valign="middle", spacing=
 
     def ink(faces):  # the letters' own extent (the advance has a little air beside each letter)
         return Part.makeCompound(faces).BoundBox if faces else None
+
+    to_box = App.Matrix(u.x, v.x, 0, centre.x,
+                        u.y, v.y, 0, centre.y,
+                        0, 0, 1, 0,
+                        0, 0, 0, 1)
+    if frame == "circle":
+        width = height = min(width, height)
+    if frame in ("ellipse", "circle") and fit:
+        out = _filled(lines, path, spacing, line_spacing, halign, width, height, mirror)
+        for f in out:
+            f.transformShape(to_box)
+        return _merged(out)
+    if frame in ("ellipse", "circle"):  # the rectangle inside the round frame
+        width, height = width / math.sqrt(2.0), height / math.sqrt(2.0)
 
     if fit:
         boxes = [ink(_line_faces(line, path, 1.0, spacing)[0]) for line in lines]
@@ -274,12 +447,54 @@ def in_box(text, path, size, corners, halign="center", valign="middle", spacing=
         out += faces
     if mirror:
         out = _mirrored(out)
-    frame = App.Matrix(u.x, v.x, 0, centre.x,
-                       u.y, v.y, 0, centre.y,
-                       0, 0, 1, 0,
-                       0, 0, 0, 1)
     for f in out:
-        f.transformShape(frame)
+        f.transformShape(to_box)
+    return _merged(out)
+
+
+def _filled(lines, path, spacing, line_spacing, halign, width, height, mirror):
+    """Fit in an ellipse (width × height, round the origin): the letters take the frame's shape, each from its own
+    foot to its own top as high as the frame is where it stands; across, the text fills the frame (to 0.97 of it:
+    at the very ends the frame has no height left). Letters over each other from left to right are one (the dot on
+    an i)."""
+    faces = []
+    for i, line in enumerate(lines):
+        row, _ = _line_faces(line, path, 1.0, spacing)
+        bb = Part.makeCompound(row).BoundBox if row else None
+        if bb is None:
+            continue
+        x = {"left": -bb.XMin, "right": -bb.XMax}.get(halign, -(bb.XMin + bb.XMax) / 2.0)
+        m = App.Matrix()
+        m.move(App.Vector(x, -i * line_spacing, 0))
+        for f in row:
+            f.transformShape(m)
+        faces += row
+    if not faces:
+        raise ValueError("Type the text")
+    whole = Part.makeCompound(faces).BoundBox
+    if whole.XLength <= 1e-9:
+        raise ValueError("Type the text")
+    cx, half_w, wide = (whole.XMin + whole.XMax) / 2.0, whole.XLength / 2.0, 0.97
+    letters = []  # [right end, [faces]]
+    for f in sorted(faces, key=lambda f: f.BoundBox.XMin):
+        b = f.BoundBox
+        if letters and b.XMin < letters[-1][0]:
+            letters[-1][0] = max(letters[-1][0], b.XMax)
+            letters[-1][1].append(f)
+        else:
+            letters.append([b.XMax, [f]])
+    out = []
+    for _right, group in letters:
+        b = Part.makeCompound(group).BoundBox
+        middle, half = (b.YMin + b.YMax) / 2.0, ((b.YMax - b.YMin) / 2.0) or 1.0
+
+        def fn(px, py, middle=middle, half=half):
+            x = (px - cx) / half_w * wide
+            y = (py - middle) / half
+            x = -x if mirror else x
+            return width / 2.0 * x, height / 2.0 * y * math.sqrt(max(0.0, 1.0 - x * x))
+
+        out += _warped(group, fn)
     return out
 
 
@@ -345,7 +560,7 @@ def along(text, path, size, edge, position="center", shift=0.0, distance=0.0, fl
         t = App.Matrix()
         t.move(App.Vector(p.x, p.y, 0))
         out += _scaled(glyph, k, t.multiply(r).multiply(m))
-    return out
+    return _merged(out)
 
 
 def _counter_clockwise(edge):

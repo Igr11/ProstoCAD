@@ -102,7 +102,7 @@ AREA_LIFT = 0.01  # mm
 SEE_THROUGH = 60  # the preview's transparency while the areas are shown
 
 
-def _lifted(source):
+def _area_placement(source):
     """Where the shown areas of a sketch go: on the sketch, lifted a hair off the face it stands on (in the part's
     face's plane they flickered in patches with it and the clicks went to the face, the user 2026-11-08), away from
     the part: along the face's outward normal; on a plane, along the sketch's own normal."""
@@ -147,7 +147,7 @@ class _AreaChoice:
         if self.names and all(self.doc.getObject(n) is not None for n in self.names):
             return
         self.names = []
-        pl = _lifted(self.source)
+        pl = _area_placement(self.source)
         for i, f in enumerate(self.faces):
             o = self.doc.addObject("Part::Feature", "Area%d" % (i + 1))
             o.Label = "Area %d" % (i + 1)
@@ -384,6 +384,8 @@ class FeatureSession(QtCore.QObject):
         self._sync_choices(self.dialog.values())
         self.dialog.accepted.connect(self.ok)
         self.dialog.applied.connect(self.apply)
+        if getattr(self.kind, "ASSEMBLY", False):  # no Apply + in the assembly's windows (the user): the next window
+            self.dialog.apply_button.hide()  # opened at once, the part's gizmo was gone and could not move it first
         self.dialog.cancelled.connect(self.cancel)
         self.dialog.activePickChanged.connect(lambda _key: self._sync_pick_view(seed=True))
         self.dialog.picksEdited.connect(self._picks_edited)
@@ -978,13 +980,13 @@ class FeatureSession(QtCore.QObject):
             pairs = [(o, el) for o, el in pairs if o.Name not in taken]
         pairs = self._retarget_body(pairs)
         if f.pick in self._GEOMETRY and f.pick not in self._ANYWHERE and self._off_base(pairs):
-            self.dialog.set_error("Pick on the current shape (%s)" % self._pick_base().Label)
+            self.dialog.set_error("Pick on the current shape (%s)" % self._pick_base().Label, waiting=True)
             return
         ok = common.whole(f.pick, [p for p in pairs if common.accepts(f.pick, *p)])
         if pairs and not ok:
             if f.pick in self._GEOMETRY and not any(el for _, el in pairs):
                 return  # a whole object (a tree row) while a face/edge is wanted: just looking, not an error
-            self.dialog.set_error("Select %s for %s" % (self._PICK_WORDS.get(f.pick, f.pick.replace("_", " ")), f.label))
+            self.dialog.set_error("Select %s for %s" % (self._PICK_WORDS.get(f.pick, f.pick.replace("_", " ")), f.label), waiting=True)
             self._pick_error = True
             return
         if not pairs and getattr(self, "_pick_error", False):
@@ -1146,7 +1148,7 @@ class FeatureSession(QtCore.QObject):
         self._point_key = key
         points = self._marker_points(field.pick)
         if not points:
-            self.dialog.set_error("Nothing to click: draw the profile first")
+            self.dialog.set_error("Nothing to click: draw the profile first", waiting=True)
             self._point_key = None
             self.dialog.set_active_pick(None)
             return
@@ -2116,7 +2118,7 @@ class FeatureSession(QtCore.QObject):
                 self._pending = current
                 self._preview()
         if self.feature is None and self.dialog is not None and not self.dialog.error_text():
-            self.dialog.set_error("Nothing to create yet")
+            self.dialog.set_error("Nothing to create yet", waiting=True)
         if self.dialog is not None and self.dialog.error_text():
             return
         built = getattr(self.kind, "before_ok", None)  # a preview drawn, not built (a pattern's outlines): built now
@@ -2141,6 +2143,8 @@ class FeatureSession(QtCore.QObject):
         self._finish(commit=True)
 
     def apply(self):
+        if getattr(self.kind, "ASSEMBLY", False):  # (no Apply + there: OK)
+            return self.ok()
         if self._previewing:
             self._after_preview = "apply"
             return

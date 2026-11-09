@@ -174,9 +174,13 @@ def test_7_browser_marking_menu_suppress():
     pad = util.add_pad(body, sketch, 5)
     doc.recompute()
     harness.pump(500)
-    s().browser.markingMenuRequested.emit(pad.Name, QtCore.QPoint(400, 400))
+    tree = s().browser.tree.viewport()
+    row = tree.mapToGlobal(tree.rect().center())  # a right-click inside the tree
+    s().browser.markingMenuRequested.emit(pad.Name, row)
     harness.pump(200)
     assert s().menu_kind == "browser" and context.target() == pad.Name
+    edge = s().browser.mapToGlobal(QtCore.QPoint(s().browser.width(), 0)).x()
+    assert s().marking_menu.geometry().left() >= edge, (s().marking_menu.geometry(), edge)  # the menu leaves the tree clear
     s().marking_menu.choose("browser.suppress")
     harness.pump(400)
     assert pad.Suppressed
