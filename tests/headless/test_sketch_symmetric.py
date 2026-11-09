@@ -81,6 +81,7 @@ class SymmetricTest(unittest.TestCase):
         (ext,) = self.projected(Part.LineSegment(V(20, -10, 0), V(20, 10, 0)))
         dot = self.add(Part.Point(V(0, 0, 0)))
         tool = SlotTool(None, self.sk, "center")
+        tool._show_fields = lambda: None  # the typed sizes at the pointer need a 3D view (since 2026-11-07)
         tool.click(*sym.snap_at(self.sk, V(0.1, 0.1, 0), 0.5))      # the centre on the point
         tool.click(*sym.snap_at(self.sk, V(20.1, 3, 0), 0.5))       # an end's centre on the projected line
         ids = tool.click(V(10, 4, 0))

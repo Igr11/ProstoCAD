@@ -125,7 +125,12 @@ def place_before(feature, thread):
     profile = getattr(feature, "Profile", None)
     profile = profile[0] if profile else None
     helpers = [o for o in group if getattr(o, "InCadHelperOf", None) == feature.Name]
-    movers = ([profile] if profile is not None and profile in after else []) + [h for h in helpers if h in after]
+    source = None
+    if profile is not None:  # an area's copy: its sketch goes too (a Revolve's axis on the sketch's projected line
+        from incad.core import regions  # pointed back past the thread, and the Hole failed: "graph must be a DAG")
+        source = regions.source_of(profile) if regions.is_profile(profile) else None
+    movers = ([source] if source is not None and source in after else []) \
+        + ([profile] if profile is not None and profile in after else []) + [h for h in helpers if h in after]
     late = set(after) - set(movers) - {feature}  # what is made only with the thread
 
     plan = {}  # (object, property) -> new value

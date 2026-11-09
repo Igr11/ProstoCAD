@@ -202,7 +202,6 @@ def test_4_a_hole_sketched_on_the_top_is_patterned_four_times_in_the_sketch():
 
 
 def test_5_edit_to_five_then_cut_gives_five_holes_in_the_solid():
-    import math
     from incad.core import sketch_patterns as sp
     sk = doc().getObject(ST["sketch"])
     name = sp.records(sk)[0]["name"]
@@ -217,11 +216,14 @@ def test_5_edit_to_five_then_cut_gives_five_holes_in_the_solid():
     assert len(sp.find(sk, name)["copies"]) == 4
     commands.REGISTRY.run("sketch.finish")
     harness.pump(1000)
-    before = tip().Shape.Volume
+    solid = tip().Shape.copy()
+    before = solid.Volume
     Gui.Selection.clearSelection()
     Gui.Selection.addSelection(doc().Name, sk.Name)
     commands.REGISTRY.run("feature.extrude")
     harness.pump(1500)
+    shell.instance().feature_session._areas.take_all()  # its five holes are five areas: all of them (⌘A, since 2026-11-08)
+    harness.pump(800)
     dialog().set_values({"operation": "cut", "extent": "through_all"})  # incad/features/extrude.py FIELDS
     harness.pump(1500)
     assert not dialog().error_text(), dialog().error_text()
@@ -229,8 +231,19 @@ def test_5_edit_to_five_then_cut_gives_five_holes_in_the_solid():
     cut = tip()
     assert cut.TypeId == "PartDesign::FeatureSubtractivePython", cut.TypeId
     assert "Invalid" not in cut.State, cut.getStatusString()
+    import Part
+    profile = cut.Profile[0] if isinstance(cut.Profile, (list, tuple)) else cut.Profile
+    holes = [w for w in profile.Shape.Wires if w.isClosed()]
+    assert len(holes) == 5, len(holes)  # the hole and its four copies, all cut
+    # each hole takes what material it goes through (the user: a part smaller than the row is no reason to fail)
+    n = App.Vector(0, 0, 1)
+    want = 0.0
+    for w in holes:
+        c = w.BoundBox.Center
+        hole = Part.makeCylinder(1.0, 400, c - n * 200, n)
+        want += hole.common(solid).Volume
     removed = before - cut.Shape.Volume
-    assert abs(removed - 5 * math.pi * 1.0 ** 2 * 10) < 5.0, removed  # five Ø2 holes through 10 mm
+    assert want > 0 and abs(removed - want) < 1.0, (removed, want)
 
 
 harness.run([test_0_open_a_copy_of_the_real_part,

@@ -1,5 +1,5 @@
 """A sketch point (here a rectangle's centre point) is easy to catch on a Retina screen (the user: one time in five): FreeCAD's pick radius
-counts device pixels, so InCad sets its default times the pixel ratio (incad.ui.pick_radius) — the point is
+counts device pixels, so InCad sets it to REACH points times the pixel ratio (incad.ui.pick_radius) — the point is
 preselected a few points off its centre, where the radius of 5 gave a diagonal, and on it, where its Symmetric
 constraint's icon was (now hidden); a radius the user chose stays."""
 import os
@@ -28,7 +28,7 @@ def test_0_widened_on_activation():
     Gui.activateWorkbench("InCadWorkbench")
     harness.pump(1000)
     r = App.ParamGet(pick_radius.VIEW).GetFloat("PickRadius", 5.0)
-    want = 5.0 * ratio() if ratio() > 1 else 5.0
+    want = pick_radius.REACH * max(ratio(), 1.0)  # REACH points of the screen on any screen (since 2026-11-07)
     assert abs(r - want) < 1e-6, (r, ratio())
 
 

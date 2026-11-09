@@ -143,7 +143,7 @@ def test_2_clicks_go_through_the_context():
     def ray_hits_context():
         rp = coin.SoRayPickAction(viewport())
         rp.setPoint(coin.SbVec2s(int(sx), int(sy)))
-        rp.apply(v.getSceneGraph())
+        rp.apply(v.getViewer().getSoRenderManager().getSceneGraph())  # the whole graph, its camera with it
         pp = rp.getPickedPoint()
         return pp is not None and pp.getPath().containsNode(node)
 

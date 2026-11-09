@@ -14,6 +14,7 @@ Inventor/Alibre-style workbench for FreeCAD 1.1.3 (macOS). Spec: docs/superpower
   check `doc.Restoring` first (`tests/gui/test_open_during_restore.py`).
 - UI text English. Chat with the user in any language.
 - Messages in windows: errors (something is wrong) in red; hints (what to do next) in blue, the theme's accent colour. The new windows (`feature_window.py`, trial 0.18 and the new program) keep their hints grey. Warnings in the status line stay red. Agreed with the user on 2026-11-09.
+- A failing test: first check whether it still describes how the program should work now. If the program changed on purpose (an agreed change), the test is outdated: update the test to the new behaviour, never turn the program back. If the change was not agreed, the failure is a bug. Unsure which: ask. The program changes, so its tests cannot stay old. Agreed with the user on 2026-11-09.
 - 1b facts: `view.getCameraNode()` needs `from pivy import coin` first; Coin pixel positions are device px with a
   bottom-left origin (`incad.ui.nav.to_coin`); FreeCAD opens its 3D context menu on the right-button release, so
   InCad's gesture rules never pass a lone right release.
