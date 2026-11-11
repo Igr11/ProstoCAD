@@ -14,6 +14,7 @@ class Field:
     show_if: tuple = None    # (other key, (values…) or a test of its value) or a tuple of those (all must hold)
     pick: str = ""           # pick fields: edge | face | feature | axis | plane | vertex | sketch | circular_edge
     listed: bool = False     # picks fields: show the picks as a numbered list (remove, reorder), e.g. Loft sections
+    ordered: bool = True     # listed fields: ▲▼ reorder (Loft sections); False: ✕ per row and Clear (Fillet edges)
     optional: bool = False   # pick fields: an empty one has a default: never made active by itself
     signed: bool = False     # value fields: below zero is a direction or a level (3D Line's At), not an error
     same_row: bool = False   # shown in the row of the field before it, its label in front of it (compact: Work Plane's

@@ -26,6 +26,7 @@ from incad.ui.marking_menu import MarkingMenu
 from incad.ui.nav import Navigator, to_coin
 from incad.ui.nav_strip import NavStrip
 
+SNAP_PX = 8  # logical px between a drawn point and a model edge or vertex that it is taken to touch
 OURS = ("InCadTop", "InCadBrowserDock", "InCadStatusBar")
 MENU_PREFIX = "InCadMenu_"
 TOOLBAR_GROUP = "User parameter:BaseApp/MainWindow/Toolbars"
