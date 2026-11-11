@@ -270,3 +270,44 @@ def pick_radius_reach():
 
 def set_pick_radius_reach(value):
     _s().set("bool", "PickRadiusReach", bool(value))
+
+
+PROJECTIONS = ("normal", "reference")
+
+
+def projected_edges():
+    """⚙ ▸ Projected Edges: normal geometry (Inventor, the default) or reference (construction, as FreeCAD's tool
+    makes them)."""
+    return _choice("ProjectedEdges", PROJECTIONS, "normal")
+
+
+def set_projected_edges(value):
+    _set_choice("ProjectedEdges", PROJECTIONS, value)
+
+
+def auto_project():
+    """⚙ ▸ Projected Edges ▸ Project What a Drawn Point Touches: a point drawn onto a model edge or vertex projects
+    it and is tied to it (on by default)."""
+    return bool(_s().get("bool", "AutoProject", True))
+
+
+def set_auto_project(value):
+    _s().set("bool", "AutoProject", bool(value))
+
+
+def last_folder():
+    """The folder files were last opened from or saved to (FreeCAD's own, kept by its Open / Save dialogs): where
+    InnCad's own dialogs start too (the user: a new part's Save on closing opened the disk's root)."""
+    import os
+    import FreeCAD as App
+    path = App.ParamGet("User parameter:BaseApp/Preferences/General").GetString("FileOpenSavePath", "")
+    return path if path and os.path.isdir(path) else os.path.expanduser("~")
+
+
+def set_last_folder(path):
+    """Remember the folder of a file just opened or saved (`path` a file or a folder)."""
+    import os
+    import FreeCAD as App
+    folder = path if os.path.isdir(path) else os.path.dirname(path)
+    if folder and os.path.isdir(folder):
+        App.ParamGet("User parameter:BaseApp/Preferences/General").SetString("FileOpenSavePath", folder)

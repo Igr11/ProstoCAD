@@ -270,6 +270,25 @@ def _sweep_apply(doc, f, values):
         raise ValueError("The path %s is in %d separate pieces: a path is one chain of lines, arcs and splines "
                          "joined end to end (make the other pieces Construction, or join them)"
                          % (path.Label, len(path.Shape.Wires)))  # FreeCAD said only "TopoDS::Wire"
+    from incad.features import sweep_check
+    try:
+        # the end the profile stands at (a profile drawn at the path's last point was measured from its first one
+        # and refused, the user's Sweep: "reaches 49.36 mm")
+        # (the end in the profile's plane; a profile off both ends, 40 mm aside of the first: the first one)
+        p0, _t0, p1, _t1 = _spine_ends(path)
+        c = prof.Shape.BoundBox.Center
+        try:
+            import Part
+            n = Part.makeFace(prof.Shape.Wires, "Part::FaceMakerBullseye").normalAt(0, 0)
+            off0, off1 = abs((p0 - c).dot(n)), abs((p1 - c).dot(n))
+        except Exception:
+            off0 = off1 = 0.0
+        nearer = (c - p1).Length < (c - p0).Length
+        start = p1 if off1 < off0 - 1e-6 or (abs(off1 - off0) <= 1e-6 and nearer) else p0
+    except Exception:
+        start = None
+    if start is not None:  # a bend tighter than the profile: refused, its cage shown (showing it crashed the app)
+        sweep_check.check(doc, prof, path, start)
     f.Profile = prof
     f.Spine = (path, [])  # the whole sketch: segments added or redrawn later are followed (probed)
     f.Transition = "Round corner" if "Round corner" in f.getEnumerationsOfProperty("Transition") else f.Transition
@@ -310,6 +329,14 @@ SWEEP = SimpleNamespace(
                                               "wall": "1 mm", "ends": "both_open"},
     create=_sweep_create, read=_sweep_read,
     update=lambda doc, f, values: (_sweep_apply(doc, f, values), f)[1], _pad_of=lambda f: f)
+
+
+def _sweep_cage(shell, session):
+    from incad.ui import sweep_cage
+    return sweep_cage.overlay(shell, session)
+
+
+SWEEP.overlay = _sweep_cage  # a bend too tight for the profile: the sweep shown as lines (incad.ui.sweep_cage)
 
 
 def _wall_drifted(f):

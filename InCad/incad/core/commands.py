@@ -67,6 +67,13 @@ class Registry:
 
     def _run(self, cmd_id):
         from incad.core.safe import SafeResult
+        try:
+            from incad.sketch_next import session as new_sketch
+            if new_sketch.handles(cmd_id):  # the new sketch is open: its own tools (ProstoCAD Try — 0.18 New Sketch)
+                return SafeResult(True, new_sketch.command(cmd_id))
+        except Exception as e:
+            log.report("error", "%s failed: %s" % (cmd_id, e), traceback.format_exc())
+            return SafeResult(False, error=str(e))
         cmd = self._cmds.get(cmd_id)
         if cmd is None:
             log.report("error", "Unknown command %s" % cmd_id)

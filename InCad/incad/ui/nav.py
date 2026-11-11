@@ -7,6 +7,7 @@ from incad.qt import QtCore, QtGui, QtWidgets
 
 QT_BUTTONS = ((QtCore.Qt.LeftButton, gestures.LEFT), (QtCore.Qt.RightButton, gestures.RIGHT),
               (QtCore.Qt.MiddleButton, gestures.MIDDLE))
+HOLD_LEFT_MS = 120  # a left press on a hook that asks for it (3D Line) waits this long for the right one (a turn)
 KINDS = {QtCore.QEvent.MouseButtonPress: "press", QtCore.QEvent.MouseButtonRelease: "release",
          QtCore.QEvent.MouseMove: "move", QtCore.QEvent.MouseButtonDblClick: "dblclick"}
 
@@ -66,6 +67,11 @@ class Navigator(QtCore.QObject):
         self._handle_viewport = None  # the viewport of a handle drag going on
         self._handle_press = None     # (x, y, modifiers) of its press
         self._swallow_release = False
+        self._held = None  # a left press held back HOLD_LEFT_MS: [viewport, view, machine, x, y, modifiers, last move]
+        self._held_timer = QtCore.QTimer(self)
+        self._held_timer.setSingleShot(True)
+        self._held_timer.setInterval(HOLD_LEFT_MS)
+        self._held_timer.timeout.connect(self._held_over)
 
     def attached(self):
         return list(self._attached)
@@ -120,6 +126,10 @@ class Navigator(QtCore.QObject):
             if kind == "press":
                 entry[2] = event.modifiers()
             pos = event.position()
+            if self._held is not None and self._held[0] is obj:
+                kept = self._while_held(machine, kind, event, pos)
+                if kept is not None:
+                    return kept
             if self._handle_viewport is not None and obj is self._handle_viewport:
                 return self._handle_event(kind, event, pos)
             if self.place_hook is not None:
@@ -133,6 +143,12 @@ class Navigator(QtCore.QObject):
             if self.move_hook is not None and kind == "move" and event.buttons() == QtCore.Qt.NoButton:
                 self.move_hook(view, obj, pos.x(), pos.y())
             if self.handle_hook is not None and self.mode is None and machine.state == "idle":
+                if kind in ("press", "dblclick") and event.button() == QtCore.Qt.LeftButton \
+                        and event.buttons() == QtCore.Qt.LeftButton and not event.modifiers() & SELECT_MODIFIERS \
+                        and kind == "press" and getattr(self.handle_hook, "hold_for_turn", False):
+                    self._held = [obj, view, machine, pos.x(), pos.y(), event.modifiers(), None]
+                    self._held_timer.start()
+                    return True
                 if kind in ("press", "dblclick") and event.button() == QtCore.Qt.LeftButton \
                         and event.buttons() == QtCore.Qt.LeftButton and not event.modifiers() & SELECT_MODIFIERS \
                         and self._call_handle("press", view, obj, pos.x(), pos.y()):
@@ -175,6 +191,46 @@ class Navigator(QtCore.QObject):
                 except Exception:
                     log.logger().exception("InCad drag")
             return False
+
+    def _while_held(self, machine, kind, event, pos):
+        """An event while a left press is held back: True consumes it, None lets it go on (after the press was
+        given away). Only time decides (the user: a hand shakes a few px on a train), never how far the mouse went."""
+        if kind == "press" and event.button() == QtCore.Qt.RightButton:  # both buttons: a turn, no point
+            held, self._held = self._held, None
+            self._held_timer.stop()
+            machine.feed("press", gestures.LEFT, gestures.LEFT, held[3], held[4])
+            return None
+        if kind == "move":
+            self._held[6] = (pos.x(), pos.y())
+            return True
+        if kind == "release" and event.button() == QtCore.Qt.LeftButton:  # a quick click: its point now
+            self._give_held()
+            return None
+        return True
+
+    def _held_over(self):
+        if self._held is None:
+            return
+        if not QtWidgets.QApplication.mouseButtons() & QtCore.Qt.LeftButton:
+            self._held = None  # its release got lost
+            return
+        try:
+            self._give_held()
+        except Exception:
+            log.logger().exception("InCad navigation")
+
+    def _give_held(self):
+        """The held press goes where it would have gone at once: the hook's (a point, a drag) or the gesture rules."""
+        viewport, view, machine, x, y, modifiers, last = self._held
+        self._held = None
+        self._held_timer.stop()
+        if self.handle_hook is not None and self._call_handle("press", view, viewport, x, y):
+            self._handle_viewport = viewport
+            self._handle_press = (x, y, modifiers)
+            if last is not None and QtWidgets.QApplication.mouseButtons() & QtCore.Qt.LeftButton:
+                self._call_handle("move", last[0], last[1])  # a drag catches up with the pointer
+            return
+        machine.feed("press", gestures.LEFT, gestures.LEFT, x, y)
 
     def _call_handle(self, name, *args):
         try:

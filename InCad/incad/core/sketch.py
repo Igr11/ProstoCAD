@@ -140,9 +140,32 @@ def make_sketch(body, support, sub="", view_dir=None, view_up=None):
     sk.MapMode = "FlatFace"
     sk.Label = _next_label(body.Document, "Sketch")
     body.Document.recompute([sk])  # it alone: nothing uses it yet (a full recompute retried every broken feature)
+    if sub and view_dir is not None and view_up is not None:  # on a face: as it was seen (the user: the hole seen
+        # bottom right stays bottom right)
+        import FreeCAD as App  # (the plane branch above imports it in the function: a local name here too)
+        view_dir, view_up = turned_view(view_dir, view_up, sk.getGlobalPlacement().Rotation.multVec(App.Vector(0, 0, 1)))
     if _turn_to_view(sk, view_dir, view_up):
         body.Document.recompute([sk])
     return sk
+
+
+def turned_view(look, up, normal):
+    """(look, up) after the camera turns the shortest way from `look` to look at a face whose normal (towards the
+    viewer) is `normal`: the screen's up turned with it. The face is then seen as it was (what was bottom right stays
+    there); the sketch's axes are then put on the nearest quarter turn of it. Seen from behind: turned over its
+    horizontal (the screen's right stays)."""
+    import FreeCAD as App
+    a = App.Vector(look)
+    a.normalize()
+    b = App.Vector(normal) * -1
+    b.normalize()
+    u = App.Vector(up)
+    if a.cross(b).Length < 1e-9:
+        if a.dot(b) > 0:
+            return b, u
+        right = a.cross(u)
+        return b, App.Rotation(right, 180).multVec(u)
+    return b, App.Rotation(a, b).multVec(u)
 
 
 def _turn_to_view(sk, view_dir, view_up):
@@ -569,8 +592,45 @@ def users(sk):
 def pending_projections(sk):
     """Refs of the projected edges that are construction without being the user's choice: in a used sketch, the
     ones adopt_projections leaves for the user."""
+    from incad.core import prefs
+    if prefs.projected_edges() == "reference":
+        return set()  # construction is what the user asked for
     chosen = _strings(sk, CHOSEN_PROP)
     return {ref for on, ref in _projected_flags(sk).values() if not on and ref not in chosen}
+
+
+def projection_refs(sk):
+    """The refs of the sketch's projected edges (what reference_new_projections compares with)."""
+    return {ref for _on, ref in _projected_flags(sk).values()}
+
+
+def reference_new_projections(sk, known):
+    """⚙ ▸ Projected Edges ▸ Reference: FreeCAD's Project tool makes an edge normal geometry (unless the Sketcher's
+    own construction mode is on), so the edges projected since `known` (refs, from projection_refs) that came out
+    normal become construction. One the user switches to normal afterwards is old by then and stays. Returns the
+    ids changed; the caller recomputes."""
+    from incad.core import prefs
+    if prefs.projected_edges() != "reference" or known is None:
+        return []
+    todo = [g for g, (on, ref) in _projected_flags(sk).items() if on and ref not in known]
+    return set_defining(sk, todo, False) if todo else []
+
+
+def projections_to_reference(sk, notes=None):
+    """⚙ ▸ Projected Edges switched to Reference: the projected edges of a sketch nothing is built on yet become
+    construction (they stay as they are in a used sketch, so no feature changes behind the user's back; `notes` gets
+    a line). Returns the ids changed; the caller recomputes."""
+    flags = _projected_flags(sk)
+    todo = [g for g, (on, _ref) in flags.items() if on]
+    if not todo:
+        return []
+    used = users(sk)
+    if used:
+        if notes is not None:
+            notes.append("%s is used by %s: its projected edges stay as they are" % (
+                sk.Label, ", ".join(o.Label for o in used[:3]) + (" …" if len(used) > 3 else "")))
+        return []
+    return set_defining(sk, todo, False)
 
 
 def adopt_projections(sk, notes=None):
@@ -583,7 +643,10 @@ def adopt_projections(sk, notes=None):
     (then it has recomputed). Makes no undo step. Never inside an open undo step (a feature dialog's, a Sketcher
     tool's) and never while the document restores or recomputes (the GUI's progress bar runs deferred handlers
     mid-recompute): the next call adopts."""
+    from incad.core import prefs
     doc = sk.Document
+    if prefs.projected_edges() == "reference":
+        return False  # ⚙ ▸ Projected Edges ▸ Reference: they stay construction, as projected
     if getattr(doc, "Restoring", False) or getattr(doc, "Recomputing", False) or doc.HasPendingTransaction:
         return False
     flags = _projected_flags(sk)

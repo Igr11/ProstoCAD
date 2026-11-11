@@ -159,11 +159,11 @@ class SketchSession:
         r = safe.run_safely("New Sketch", lambda: sketch.make_sketch(body, support, face, view_dir, view_up), doc,
                             only=lambda sk: [sk])
         if r.ok:
-            self.edit(r.value)
+            self.edit(r.value, fresh=True)
             return r.value
         return None
 
-    def edit(self, sk):
+    def edit(self, sk, fresh=False):
         import FreeCADGui as Gui
         vo = sk.ViewObject
         key = (sk.Document.Name, sk.Name)
@@ -179,13 +179,9 @@ class SketchSession:
             vo.Autoconstraints = True
         if self._on_edit is not None:
             self._on_edit(sk)
-        body = document.body_of(sk)
-        shown = bool(body is not None and body.Tip is not None and body.Tip.Visibility)
-        visible = [o for o in sk.Document.Objects if o is not sk and o.isDerivedFrom("Part::Feature") and o.Visibility]
-        Gui.getDocument(sk.Document.Name).setEdit(sk.Name)
-        self._show_unrelated(sk, visible)
-        if shown:
-            self._show_part_before(sk, body)
+        from incad.sketch_next import session as new_sketch
+        new_sketch.open_sketch(sk, on_change=self._changed, fresh=fresh)  # the new sketch, not Sketcher's editing
+        # (0.18 trial); fresh: made just now (Cancel, or Undo back past it, takes it away)
         self._last_edited = key
         self._changed()
 
@@ -290,6 +286,9 @@ class SketchSession:
             self._text_lines = None
         if editing is None:
             return
+        from incad.sketch_next import session as new_sketch
+        if new_sketch.editing() is editing:
+            return  # the new sketch draws its texts' letters itself, as they stand while it is edited
         try:
             import FreeCADGui as Gui
             from pivy import coin
@@ -351,6 +350,43 @@ class SketchSession:
         except Exception:
             return True
 
+    def _cuts_later(self, editing):
+        """True until the opened sketch has turned to face the viewer (its first frame drawn, then its turn): the
+        see-through test waits for that, then this runs again; False after it, or with no view to wait for."""
+        key = (editing.Document.Name, editing.Name)
+        if getattr(self, "_frame_seen", None) == key:
+            return False
+        if getattr(self, "_frame_wait", None) == key:
+            return True
+        try:
+            import FreeCADGui as Gui
+            from incad.qt import viewport_of
+            vp = viewport_of(Gui.getDocument(editing.Document.Name).ActiveView)
+        except Exception:
+            return False
+        if vp is None or not vp.isVisible():
+            return False
+        from incad.qt import QtCore
+        owner = self
+
+        class _Frame(QtCore.QObject):
+            def eventFilter(self, obj, e):
+                if e.type() == QtCore.QEvent.Paint:
+                    vp.removeEventFilter(self)
+                    from incad.sketch_next import session as new_sketch
+
+                    def now():
+                        owner._frame_seen, owner._frame_wait = key, None
+                        owner._sync_dimmed(owner.editing())
+                    QtCore.QTimer.singleShot(new_sketch.TURN_MS + 80, now)
+                    # after the turn to the sketch (run at once, the slice stopped the turn half way)
+                return False
+        self._frame_wait = key
+        self._frame_filter = _Frame(vp)
+        vp.installEventFilter(self._frame_filter)
+        vp.update()
+        return True
+
     def _sync_dimmed(self, editing):
         """While a sketch is open the shown solids get an override material on top of each one's scene, never the
         object's own colour (nothing saved, nothing to undo), off again after: darker in the dark theme, and
@@ -381,6 +417,11 @@ class SketchSession:
                         continue
                     ck = where + (o.Name,)
                     if ck not in cuts:
+                        if self._cuts_later(editing):  # once the sketch's first frame is drawn: the slice of a
+                            # heavy part (a modeled thread: 0.12 s) held the turn to the sketch back
+                            if dark:
+                                want[(o.Document.Name, o.Name)] = (o, dark, False)
+                            continue
                         cuts.clear() if len(cuts) > 200 else None
                         cuts[ck] = self._cut_by(o.Shape, editing)
                     if dark or cuts[ck]:
@@ -436,6 +477,9 @@ class SketchSession:
         fs = sh.feature_session if sh is not None else None
         if fs is not None and getattr(fs.kind, "IN_SKETCH", False):
             fs.cancel()  # the pattern dialog cannot outlive its sketch
+        from incad.sketch_next import session as new_sketch
+        if new_sketch.current() is not None:
+            new_sketch.current().finish()
         gdoc = Gui.ActiveDocument
         if gdoc is not None and gdoc.getInEdit() is not None:
             close_edit(gdoc)
@@ -446,6 +490,9 @@ class SketchSession:
     @staticmethod
     def editing():
         """The sketch being edited, or None."""
+        from incad.sketch_next import session as new_sketch
+        if new_sketch.editing() is not None:
+            return new_sketch.editing()
         import FreeCADGui as Gui
         gdoc = Gui.ActiveDocument
         vp = gdoc.getInEdit() if gdoc is not None else None

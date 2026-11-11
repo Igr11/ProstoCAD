@@ -5,6 +5,11 @@ This build: VERSION
 Newest build first. The build name is the name of the zip file.
 
 
+0.18.0
+----
+- Test build (not released): the new sketch, the new feature windows, the Settings window.
+
+
 0.17.5
 ----
 Improvements

@@ -536,6 +536,7 @@ class Shell(QtCore.QObject):
         self._area_warned = set()  # area copies already reported as lost (until their area is back)
         self._visibility_applied = set()  # document names whose saved visibility was put in step once
         self._adopt_tried = set()  # files made outside InCad already offered to become InCad parts
+        self._projection_refs = {}  # (doc, sketch) -> refs of its projected edges when last looked at
         self._projections_told = {}  # (doc, sketch) -> Refs of projected edges a used sketch was told to keep
         self._sel_watch = None
         self._section_display = None  # ([SectionDisplay], doc, view, [Caps], [(shape, colour)]) while sectioned
@@ -563,6 +564,7 @@ class Shell(QtCore.QObject):
         self._contexts = {}       # part document name -> AssemblyContext (Edit from an assembly: the parts around it)
         self.start_page = None    # the recent files, while no file is open (incad.ui.start_page)
         self._hover_watch = None
+        self._edge_light = None   # an edge under the pointer lit in its own colour (incad.ui.edge_highlight)
         self._polygons_from = {}
         self._rects_from = {}  # per sketch: where the geometry drawn since it was opened starts
         self._rects_done = {}  # per sketch: the rectangles given their centre point (geometry ids)
@@ -978,6 +980,13 @@ class Shell(QtCore.QObject):
             except Exception:
                 pass
             self._hover_watch = None
+        if self._edge_light is not None:
+            try:
+                import FreeCADGui as Gui
+                Gui.Selection.removeObserver(self._edge_light)
+            except Exception:
+                pass
+            self._edge_light = None
         if self._dof_glyphs is not None:
             self._dof_glyphs.remove()
             self._dof_glyphs = None
@@ -1058,50 +1067,10 @@ class Shell(QtCore.QObject):
         self.ribbon = self.title = self.browser = self.status = None
 
     def _settings_menu(self, parent):
-        menu = QtWidgets.QMenu(parent)
-        themes_menu = menu.addMenu("Theme")
-        for value, label in (("auto", "Match " + host.OS_NAME), ("light", "Light"), ("dark", "Dark")):
-            act = themes_menu.addAction(label)
-            act.setCheckable(True)
-            act.setChecked(prefs.theme() == value)
-            act.triggered.connect(lambda _=False, v=value: self._set_theme_pref(v))
-        menu.addMenu(self.ribbon.size_menu(menu))
-        units = menu.addMenu("Units for New Files")
-        current = prefs.default_units() if prefs.remember_new_choice() else "ask"
-        for value, label in (("ask", "Ask every time"), ("mm", "Always millimeters"), ("in", "Always inches")):
-            act = units.addAction(label)
-            act.setCheckable(True)
-            act.setChecked(current == value)
-            act.triggered.connect(lambda _=False, v=value: self._set_new_units(v))
-        dims = menu.addMenu("Dimension Display")
-        for value, label in (("value", "Value (40)"), ("name", "Name (d3)"), ("expression", "Expression (d3 = 40)")):
-            act = dims.addAction(label)
-            act.setCheckable(True)
-            act.setChecked(prefs.dimension_display() == value)
-            act.triggered.connect(lambda _=False, v=value: (prefs.set_dimension_display(v), self.apply_theme()))
-        quality_menu = menu.addMenu("Display Quality")
-        for value, label in (("normal", "Normal (faster)"), ("fine", "Fine (smoother curves)")):
-            act = quality_menu.addAction(label)
-            act.setCheckable(True)
-            act.setChecked(prefs.display_quality() == value)
-            act.triggered.connect(lambda _=False, v=value: self.set_display_quality(v))
-        diag_act = menu.addAction("Rectangle Diagonals")
-        diag_act.setCheckable(True)
-        diag_act.setChecked(prefs.rectangle_diagonals())
-        diag_act.setToolTip("New rectangles keep their two diagonals as construction lines")
-        diag_act.triggered.connect(lambda checked: prefs.set_rectangle_diagonals(checked))
-        menu.addAction("Show Log File").triggered.connect(lambda _=False: self._show_log())
-        menu.addAction("Report a Bug…").triggered.connect(lambda _=False: self.report_bug())
-        menu.addAction("Check for Updates…").triggered.connect(lambda _=False: self.check_updates())
-        upd_act = menu.addAction("Check for Updates at Start")
-        upd_act.setCheckable(True)
-        upd_act.setChecked(prefs.update_check_at_start())
-        upd_act.triggered.connect(lambda checked: prefs.set_update_check_at_start(checked))
-        nav_act = menu.addAction("Mouse Navigation (LMB+RMB orbit, right-click menu)")
-        nav_act.setCheckable(True)
-        nav_act.setChecked(prefs.navigation_enabled())
-        nav_act.triggered.connect(lambda checked: self.set_navigation(checked))
-        return menu
+        """⚙: the new program's Settings panel (ui/settings_panel.py; the user, 2026-11-10: one Settings window in both
+        programs). The old ⚙ menu's settings are in it, applied by the same code."""
+        from incad.ui import settings_panel
+        return settings_panel.menu(self, parent)
 
     @staticmethod
     def set_display_quality(value):
@@ -1533,16 +1502,18 @@ class Shell(QtCore.QObject):
             plane.Visibility = False
             self._hidden_plane = (plane.Document.Name, plane.Name)
 
-    def _project_other_at(self, view, viewport, x, y):
+    def _project_other_at(self, view, viewport, x, y, direct=False, hits=None):
         """A click while Project Geometry runs: on an edge or face of another Solid it is copied in; an edge seen
         through a see-through plane is projected (the plane doesn't catch it); a plane clicked where nothing is
         behind it gives its line in the sketch; the sketch's own plane lets the click through (True for these).
-        Anything else is FreeCAD's (False)."""
+        Anything else is FreeCAD's (False). direct (the new sketch, no FreeCAD tool running): a plain click on the
+        part is projected here too, the same way (addExternal); hits: what it found under the pointer itself."""
         from incad.ui.nav import to_coin
-        try:
-            hits = view.getObjectsInfo(to_coin(viewport, x, y)) or []
-        except Exception:
-            hits = []
+        if hits is None:
+            try:
+                hits = view.getObjectsInfo(to_coin(viewport, x, y)) or []
+            except Exception:
+                hits = []
         sk = self.sketches.editing()
         if sk is None or not hits:
             return False
@@ -1566,9 +1537,10 @@ class Shell(QtCore.QObject):
             info = solid[0]  # through the sketch's own plane to the face behind it
         if not str(info.get("Component", "")).startswith(("Edge", "Face", "Vertex")):
             return False
-        if self.copy_foreign_pick(info.get("Document", ""), info.get("Object", ""), info["Component"]):
+        if self.copy_foreign_pick(info.get("Document", ""), info.get("Object", ""), info["Component"],
+                                  running=True if direct else None):
             return True
-        if info is hits[0]:
+        if info is hits[0] and not direct:
             return False  # a plain click on the part: FreeCAD's own tool projects it
         return self._project_behind(sk, info)
 
@@ -1632,7 +1604,7 @@ class Shell(QtCore.QObject):
             log.report("warning", r.error)
         return True
 
-    def copy_foreign_pick(self, doc_name, obj_name, sub):
+    def copy_foreign_pick(self, doc_name, obj_name, sub, running=None):
         """Project Geometry clicked an edge or face of another Solid, which FreeCAD will not link into the open
         sketch: its edges are copied in as the sketch's own lines (they don't follow that Solid). True when it was
         such a pick (copied, or tried and said why)."""
@@ -1640,7 +1612,7 @@ class Shell(QtCore.QObject):
         from incad.core import document, safe
         from incad.core import sketch as sketches
         sk = self.sketches.editing()
-        if sk is None or not self._projection_running():
+        if sk is None or not (self._projection_running() if running is None else running):
             self.projecting = False  # the tool or the sketch is over
             return False
         doc = App.getDocument(doc_name) if doc_name in App.listDocuments() else None
@@ -1915,6 +1887,14 @@ class Shell(QtCore.QObject):
             self.feature_session.cancel()
             return
         import FreeCADGui as Gui
+        from incad.sketch_next import session as new_sketch
+        if new_sketch.current() is not None:  # the new sketch: its own Esc (the tool ends; the sketch stays open)
+            if getattr(new_sketch.current(), "projecting", False):
+                new_sketch.current().project_stop()  # Project Geometry ends; the sketch stays open
+                return
+            lay = new_sketch.current().layer
+            lay.keyPressEvent(QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Escape, QtCore.Qt.NoModifier))
+            return
         if self.sketches.editing() is not None:
             Gui.runCommand("Sketcher_StopOperation")  # ends the running Sketcher tool; the sketch stays open
             return
@@ -2233,6 +2213,30 @@ class Shell(QtCore.QObject):
         except Exception:
             return False
 
+    def _set_projected_edges(self, value):
+        """⚙ ▸ Projected Edges: the open sketch follows at once (the user: switching did nothing to the edges there)."""
+        from incad.core import safe
+        from incad.core import sketch as sketches
+        prefs.set_projected_edges(value)
+        sk = self.sketches.editing()
+        if sk is None or not sketches.projected(sk):
+            return
+        notes = []
+        if value == "reference":
+            r = safe.run_safely("Projected Edges", lambda: sketches.projections_to_reference(sk, notes), sk.Document,
+                                only=[sk])
+            if not r.ok:
+                log.report("warning", r.error)
+        else:
+            try:
+                sketches.adopt_projections(sk, notes)  # its own rule: no undo step, recomputes when it changes
+            except Exception as e:
+                log.report("warning", "Could not make the projected edges normal geometry: %s" % e)
+        for text in notes:
+            log.report("info", text)
+        self._projection_refs[(sk.Document.Name, sk.Name)] = sketches.projection_refs(sk)
+        self.schedule_refresh()
+
     @perf.timed("projection changed")
     def _projection_changed(self, sk):
         """An edge projected (or its projection undone / redone): it becomes normal geometry right away."""
@@ -2258,9 +2262,12 @@ class Shell(QtCore.QObject):
                 else:
                     log.logger().info("Projected edges of %s: still busy after 6 s, left to the next change", sk.Label)
                 return
+            key = (doc.Name, sk.Name)
+            if sketches.reference_new_projections(sk, self._projection_refs.get(key)):
+                sk.recompute()  # ⚙ ▸ Projected Edges ▸ Reference: FreeCAD's tool made them normal
+            self._projection_refs[key] = sketches.projection_refs(sk)
             notes = []
             adopted = sketches.adopt_projections(sk, notes)
-            key = (doc.Name, sk.Name)
             pending = sketches.pending_projections(sk)
             new = pending - self._projections_told.get(key, set())
             self._projections_told[key] = pending
@@ -3126,6 +3133,10 @@ class Shell(QtCore.QObject):
         if sk is not None:  # a Text: edited inside its sketch (its point and curve are picked there)
             if self.sketches.editing() is not sk:
                 self.sketches.edit(sk)
+            from incad.sketch_next import session as new_sketch
+            if new_sketch.current() is not None and new_sketch.editing() is sk:  # the new sketch's own Text window
+                new_sketch.current().edit_text(feature.Name)
+                return
             self._leave_sketch_tools()
             self._open_session(kind, feature.Document, body, profile=sk, feature=feature)
             return
@@ -3283,6 +3294,10 @@ class Shell(QtCore.QObject):
             from incad.ui.dof_glyphs import HoverWatch
             self._hover_watch = HoverWatch(self._on_dof_hover)
             Gui.Selection.addObserver(self._hover_watch)
+        if self._edge_light is None:
+            from incad.ui.edge_highlight import EdgeHighlight
+            self._edge_light = EdgeHighlight()
+            Gui.Selection.addObserver(self._edge_light)
         import FreeCAD as App
         log.set_reporter(self._report)
         from incad.core import safe
@@ -3670,7 +3685,8 @@ class Shell(QtCore.QObject):
             features = sum(1 for b in bodies for o in b.Group if o.TypeId != "Sketcher::SketchObject")
             self.status.set_stats(len(bodies), features)
             if editing is not None:
-                self.status.set_prompt("Sketch: draw and dimension, then Finish Sketch (Esc)")
+                from incad.sketch_next import session as new_sketch
+                self.status.set_prompt(new_sketch.prompt() or "Sketch: draw and dimension, then Finish Sketch (Esc)")
             elif self.sketches.picking:
                 self.status.set_prompt("Pick a plane or a flat face for the new sketch (Esc cancels)")
             else:

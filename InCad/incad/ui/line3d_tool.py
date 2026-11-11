@@ -18,6 +18,10 @@ def _rgb(hex_color):
 
 
 class LatticeOverlay:
+    # the view turns all the time while a 3D line is drawn (LMB+RMB): a left press waits nav.HOLD_LEFT_MS for the right
+    # one before it adds a point (the user: the left button took the turn's press and put a point where none was meant)
+    hold_for_turn = True
+
     def __init__(self, shell, session):
         self.shell, self.session = shell, session
         self.root = self._hover_sep = self._view = None

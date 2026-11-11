@@ -145,8 +145,13 @@ class ShapesTest(unittest.TestCase):
         sketch(self.body, "XZ_Plane", "Path", [Part.LineSegment(App.Vector(0, 0, 0), App.Vector(0, 20, 0)),
                                                Part.LineSegment(App.Vector(10, 30, 0), App.Vector(30, 30, 0)), arc])
         self.doc.recompute()
-        with self.assertRaises(ValueError) as ctx:
-            self.make(shapes.SWEEP, profile="Prof", path="Path")
+        from incad.features import sweep_check
+        sweep_check.FORCE = True  # built anyway (the user said yes to a bend too tight): refused, inside out
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                self.make(shapes.SWEEP, profile="Prof", path="Path")
+        finally:
+            sweep_check.FORCE = False
         self.assertIn("38 mm away from the path's start", str(ctx.exception))
 
     def test_sweep_follows_a_changed_path(self):

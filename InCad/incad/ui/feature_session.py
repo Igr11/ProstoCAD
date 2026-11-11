@@ -272,6 +272,45 @@ class _Recomputed:
 _AGAIN = {}  # kind name -> the values Apply + carries into the next dialog of that kind (picks left out)
 
 
+def _ask_risky(parent, title):
+    """Save / Build without saving / Cancel before a build that may crash the program."""
+    box = QtWidgets.QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setText("Save before building?")
+    box.setInformativeText("The program may crash while it builds this.")
+    save = box.addButton("Save", QtWidgets.QMessageBox.AcceptRole)
+    build = box.addButton("Build without saving", QtWidgets.QMessageBox.DestructiveRole)
+    box.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+    box.setDefaultButton(save)
+    box.exec()
+    clicked = box.clickedButton()
+    return "save" if clicked is save else "build" if clicked is build else "cancel"
+
+
+ASK_RISKY = _ask_risky  # (tests answer it)
+
+
+def save_before_risk(doc):
+    """Save the part before a risky build: to its file, or, never saved, as <name>.FCStd in the last folder used
+    (a number added when that name is taken). The path saved to."""
+    import os
+    from incad.core import prefs
+    if doc.FileName:
+        doc.save()
+        path = doc.FileName
+    else:
+        folder = prefs.last_folder()
+        base = doc.Label or doc.Name
+        path = os.path.join(folder, base + ".FCStd")
+        n = 2
+        while os.path.exists(path):
+            path = os.path.join(folder, "%s %d.FCStd" % (base, n))
+            n += 1
+        doc.saveAs(path)
+    log.report("info", "Saved %s to %s before the risky build" % (doc.Label, path))
+    return path
+
+
 def _carried(kind, values):
     """What Apply + keeps for the next one: every value but the picks (the user: the settings are remembered)."""
     return {f.key: values[f.key] for f in kind.FIELDS
@@ -294,6 +333,7 @@ class FeatureSession(QtCore.QObject):
         self._timer.setInterval(250)
         self._timer.timeout.connect(self._preview)
         self._previewing = False
+        self._risky = False  # the last preview was refused as risky (a Sweep bent too tight): OK asks, saves, builds
         self._after_preview = None
         self._pending = None
         self._applied = None
@@ -369,7 +409,9 @@ class FeatureSession(QtCore.QObject):
             log.report("error", "%s could not start: %s" % (self.kind.TITLE, e))
             self._finish(commit=False)
             return False
-        self.dialog = FeatureDialog(self.kind.TITLE, self.kind.ICON, self.kind.FIELDS, values, self._theme, self._parent)
+        from incad.ui.new_feature_window import NewFeatureDialog  # ProstoCAD 0.18: the new program's window, the
+        # old one's ways (FeatureDialog stays for its helpers)
+        self.dialog = NewFeatureDialog(self.kind.TITLE, self.kind.ICON, self.kind.FIELDS, values, self._theme, self._parent)
         self._started = True
         self._applied = self.dialog.values()
         if not self.creating:
@@ -1604,6 +1646,7 @@ class FeatureSession(QtCore.QObject):
         safe.watch_esc()  # Esc from now on stops a long preview (the user: Escape must cancel any operation)
         values, self._pending = self._pending, None
         self._applied = values
+        self._risky = False
         if self.creating and self._areas is not None and not self._areas.picked:
             self._areas_dirty = False
             if self.feature is not None:  # every area left out again: nothing to show
@@ -1639,14 +1682,25 @@ class FeatureSession(QtCore.QObject):
             self._recompute()
             self._before_thread()
         except Exception as e:
+            self._risky = bool(getattr(e, "risky", False))
             self._recover_deleted_feature()  # a type-swapping update() may have deleted it then failed
             if self.creating and self.feature is None:
                 self._drop_partial()
             # nothing made yet while the user is still picking: the reason is a hint, not an error
             values = self.dialog.values()
             empty = bool(self._waiting_picks())
-            waiting = self.creating and self.feature is None and (self.dialog.active_pick() is not None or empty)
+            waiting = empty or (self.creating and self.feature is None and self.dialog.active_pick() is not None)
+            # (a pick still to fill: the reason asks for it, a hint, not red; the user: red is for errors only —
+            # Revolve, made at once from its profile, showed "Pick … for the axis" red)
             self.dialog.set_error(str(e), waiting=waiting)
+            if self._risky:  # OK and Apply + stay on: they ask to save, then build it anyway (the error locked them:
+                self._unlock_ok()  # the user's "Clicking on OK does nothing")
+            # the abort above took back the picked sketches' Visibility too (it was set inside the undo step):
+            # shown again (the user: Sweep's profile vanished while the path was still to pick)
+            try:
+                self._sync_sketch_markers()
+            except Exception:
+                log.logger().exception("sketch markers after a failed preview")
             return
         self._check()
         if self.feature is not None and _feature_alive(self.feature):
@@ -2120,6 +2174,8 @@ class FeatureSession(QtCore.QObject):
         if self.feature is None and self.dialog is not None and not self.dialog.error_text():
             self.dialog.set_error("Nothing to create yet", waiting=True)
         if self.dialog is not None and self.dialog.error_text():
+            if self._risky and self._build_risky():
+                return self.ok()  # built: committed as any other
             return
         built = getattr(self.kind, "before_ok", None)  # a preview drawn, not built (a pattern's outlines): built now
         if built is not None and self.feature is not None and _feature_alive(self.feature):
@@ -2141,6 +2197,38 @@ class FeatureSession(QtCore.QObject):
         if weak:
             log.report("warning", weak)  # kept (the user may mean it), but said: it fails later otherwise
         self._finish(commit=True)
+
+    def _unlock_ok(self):
+        d = self.dialog
+        if d is None:
+            return
+        if hasattr(d, "lock"):  # the new window
+            d.lock(False)
+        for b in (getattr(d, "ok_button", None), getattr(d, "apply_button", None)):  # the old one
+            if b is not None:
+                b.setEnabled(True)
+
+    def _build_risky(self):
+        """A build that may crash the program (a Sweep bent too tight): asked to save first, then built anyway
+        (the user: built with consent, the part saved before the risk). False: not built (Cancel, or a failed
+        save, or it failed for another reason)."""
+        answer = ASK_RISKY(self.dialog, self.kind.TITLE)
+        if answer == "cancel":
+            return False
+        if answer == "save":
+            try:
+                save_before_risk(self.doc)
+            except Exception as e:
+                self.dialog.set_error("Not saved, so not built: %s" % e)
+                return False
+        from incad.features import sweep_check
+        sweep_check.FORCE = True
+        try:
+            self._pending = self.dialog.values()
+            self._preview()
+        finally:
+            sweep_check.FORCE = False
+        return not self._closed and self.dialog is not None and not self.dialog.error_text()
 
     def apply(self):
         if getattr(self.kind, "ASSEMBLY", False):  # (no Apply + there: OK)

@@ -17,7 +17,7 @@ SKETCHER = {  # InCad id: (label, icon, FreeCAD Sketcher command, shortcut)
     "sketch.arc": ("3-Point Arc", "arc", "Sketcher_CreateArc", "A"),
     "sketch.rectangle": ("Rectangle", "rectangle", "Sketcher_CreateRectangle", "R"),
     "sketch.slot": ("Center-to-Center Slot", "slot", "Sketcher_CreateSlot", ""),
-    "sketch.polygon": ("Hexagon", "polygon", "Sketcher_CreateHexagon", ""),
+    "sketch.polygon": ("Polygon", "polygon", "Sketcher_CreateHexagon", ""),  # the new sketch's Polygon window
     "sketch.spline": ("Spline", "spline", "Sketcher_CreateBSplineByInterpolation", ""),
     "sketch.point": ("Point", "sk_point", "Sketcher_CreatePoint", ""),
     "sketch.fillet": ("Fillet", "sk_fillet", "Sketcher_CreateFillet", ""),
@@ -606,6 +606,13 @@ def start_sketch():
 def finish_sketch():
     from incad.ui import shell
     shell.sketch_session().finish()
+
+
+def cancel_sketch():
+    """Cancel Sketch (ProstoCAD 0.18 trial): the new sketch answers it itself (incad.sketch_next.session.cancel)."""
+    from incad.sketch_next import session as new_sketch
+    if new_sketch.current() is not None:
+        new_sketch.command("sketch.cancel")
 
 
 def finish_dialog():
@@ -1760,6 +1767,9 @@ def commands():
                 tooltip="Pick a plane or a flat face to sketch on (no part open: a new part first)"),
         Command(id="sketch.finish", label="Finish Sketch", icon="finish", handler=finish_sketch,
                 contexts=frozenset({"sketch"}), tooltip="Back to the 3D model (Esc)"),
+        Command(id="sketch.cancel", label="Cancel Sketch", icon="close", handler=cancel_sketch,
+                contexts=frozenset({"sketch"}),
+                tooltip="Leave the sketch keeping nothing of it: a sketch made just now goes away"),
         Command(id="feature.extrude", label="Extrude", icon="extrude", handler=lambda: start_feature("extrude"),
                 shortcut="E", contexts=frozenset({"part"}), tooltip="Extrude a sketch profile"),
         Command(id="feature.revolve", label="Revolve", icon="revolve", handler=lambda: start_feature("revolve"),
@@ -1853,6 +1863,12 @@ def commands():
                 handler=lambda: start_feature("move_face"), contexts=frozenset({"part"}),
                 tooltip="Move flat faces by a distance or up to a face; the neighbours follow (Inventor), stay "
                         "(Step) or move with them (Together)"),
+        # the new sketch's own (0.18 New Sketch trial): the open new sketch runs them (commands.Registry._run)
+        Command(id="sketch.arc_tangent", label="Tangent Arc", icon="arc_tangent", handler=lambda: None,
+                contexts=frozenset({"sketch"})),
+        Command(id="sketch.rotate", label="Rotate", icon="rotate", handler=lambda: None, contexts=frozenset({"sketch"})),
+        Command(id="sketch.dim_construction", label="Dim Construction Lines", icon="dim_construction",
+                handler=lambda: None, contexts=frozenset({"sketch"})),
         Command(id="sketch.circle_tangent", label="Tangent Circle", icon="circle_tangent",
                 handler=lambda: tangent_circle(), contexts=frozenset({"sketch"}),
                 tooltip="A circle tangent to two or three lines, arcs or circles: click them one after another (construction and "
