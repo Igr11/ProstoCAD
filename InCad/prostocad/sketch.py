@@ -101,23 +101,29 @@ DWELL_MS = 600
 POINT_HINTS = ("grid", "point", "mid", "arc_mid", "x", "cross", "perp", "half", "square", "along", "sweep", "quad", "ell_x", "tan_ell")  # the hints that are a place, not a direction
 # what each constraint takes, in the order it is picked: each way is a row of slots, each slot the kinds it accepts
 _ANY = ("line", "arc")
+# The sketch's own X and Y axes and the origin (where they cross) are objects of the constraints as they are in the old
+# program (the user, 2026-11-14): a point on an axis or in the origin, a line on, parallel or square to an axis, an arc's
+# centre in the origin, a circle touching an axis. Each way below is a pair of picks, in either order.
 CONSTRAINTS = {
-    "Coincident": ((("point",), ("point", "line", "arc", "ell")), (("line", "arc", "ell"), ("point",))),
-    "Concentric": ((("arc",), ("arc",)),),
-    "Horizontal": ((("line",),), (("point",), ("point",))),
-    "Vertical": ((("line",),), (("point",), ("point",))),
-    "Parallel": ((("line",), ("line",)),),
-    "Collinear": ((("line",), ("line",)),),
-    "Perpendicular": ((("line",), ("line",)),),
-    "Tangent": ((("line",), ("arc", "ell")), (("arc",), ("line", "arc", "ell")), (("ell",), ("line", "arc"))),
+    "Coincident": ((("point",), ("point", "line", "arc", "ell")), (("line", "arc", "ell"), ("point",)),
+                   (("point",), ("origin", "axis")), (("origin", "axis"), ("point",)),
+                   (("line",), ("axis",)), (("axis",), ("line",)), (("arc",), ("origin",)), (("origin",), ("arc",))),
+    "Concentric": ((("arc",), ("arc",)), (("arc",), ("origin",)), (("origin",), ("arc",))),
+    "Horizontal": ((("line",),), (("point",), ("point",)), (("point",), ("origin",)), (("origin",), ("point",))),
+    "Vertical": ((("line",),), (("point",), ("point",)), (("point",), ("origin",)), (("origin",), ("point",))),
+    "Parallel": ((("line",), ("line",)), (("line",), ("axis",)), (("axis",), ("line",))),
+    "Collinear": ((("line",), ("line",)), (("line",), ("axis",)), (("axis",), ("line",))),
+    "Perpendicular": ((("line",), ("line",)), (("line",), ("axis",)), (("axis",), ("line",))),
+    "Tangent": ((("line",), ("arc", "ell")), (("arc",), ("line", "arc", "ell")), (("ell",), ("line", "arc")),
+                (("arc",), ("axis",)), (("axis",), ("arc",))),
     "Equal": ((("line",), ("line",)), (("arc",), ("arc",))),
     "Symmetric": tuple(((k,), (k,), ("line", "point")) for k in ("point", "line", "arc", "ell", "spl")),
     "Fix": ((("point",),),),
 }
-CONSTRAINT_NEEDS = {"Coincident": "a point and a point, a line, an arc or an ellipse", "Concentric": "two arcs",
-                    "Horizontal": "one line or two points", "Vertical": "one line or two points",
-                    "Parallel": "two lines", "Collinear": "two lines", "Perpendicular": "two lines",
-                    "Tangent": "a line and an arc or an ellipse, or two arcs, or an arc and an ellipse", "Equal": "two lines or two arcs",
+CONSTRAINT_NEEDS = {"Coincident": "a point and a point, a line, an arc, an ellipse, an axis or the origin", "Concentric": "two arcs, or an arc and the origin",
+                    "Horizontal": "one line or two points (or a point and the origin)", "Vertical": "one line or two points (or a point and the origin)",
+                    "Parallel": "two lines, or a line and an axis", "Collinear": "two lines, or a line and an axis", "Perpendicular": "two lines, or a line and an axis",
+                    "Tangent": "a line and an arc or an ellipse, or two arcs, or an arc and an ellipse, or an arc and an axis", "Equal": "two lines or two arcs",
                     "Symmetric": "two like figures and a line, an axis or a point", "Fix": "one point"}
 
 
@@ -806,6 +812,7 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         self.tab_point = None  # the point Tab chose among those standing in one place
         self.sel_lines, self.sel_arcs = set(), set()  # what is chosen
         self.sel_pts = set()  # tied points chosen: only to break what ties them
+        self.sel_places = set()  # the centre point and the axes chosen: ("origin", None), ("axis", "x" / "y"); a constraint takes them
         self.boxing = None  # the box being pulled: dict(at, to, touch, add)
         self.clip = None  # what Copy took: dict(pts, lines, arcs, constr, arc_constr, relations, ties, middle)
         self.basing = None  # Copy: its start point is being asked for
@@ -1241,7 +1248,18 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
 
     def overlaps(self):
         """[(a, b)]: the pieces where two normal (not construction) lines lie on each other — Extrude, Revolve and
-        Trim cannot make sense of them (the user: show it at once, warn before the sketch is closed)."""
+        Trim cannot make sense of them (the user: show it at once, warn before the sketch is closed). Worked out
+        once until the sketch changes: every pair of lines at every paint, a sketch of 300 lines on a part's face
+        hardly moved (the user, 2026-11-21)."""
+        key = (tuple((p.x(), p.y()) for p in self.pts), tuple(self.lines), tuple(self.constr))
+        kept = getattr(self, "_overlaps_kept", None)
+        if kept is not None and kept[0] == key:
+            return kept[1]
+        out = self._overlaps_find()
+        self._overlaps_kept = (key, out)
+        return out
+
+    def _overlaps_find(self):
         out = []
         normal = [(self.pts[ia], self.pts[ib]) for i, (ia, ib) in enumerate(self.lines) if not self.is_construction(i)]
         for k in range(len(normal)):
@@ -2427,7 +2445,9 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         elif kinds == ["line"]:
             new = dict(kinds=["dim_len", "dim_dx", "dim_dy"], pts=list(self.lines[p[0][1]]))
         elif kinds == ["point", "point"]:
-            new = dict(kinds=["dim_len", "dim_dx", "dim_dy"], pts=[p[0][1], p[1][1]])
+            # the space bar goes horizontal, vertical, then aligned (the user, 2026-11-11: for every point-to-point
+            # dimension the level and the upright ones first); the pointer's place still picks one first (_dim_type)
+            new = dict(kinds=["dim_dx", "dim_dy", "dim_len"], pts=[p[0][1], p[1][1]])
         elif kinds == ["arc"]:
             c, a = self.arcs[p[0][1]][:2]
             new = dict(kinds=["dim_d", "dim_r"] if self.is_circle(p[0][1]) else ["dim_r", "dim_d"], pts=[c, a], arc=p[0][1])
@@ -2462,7 +2482,7 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
             other = ("point", self.arcs[other[1]][0])
         if other[0] == "point":
             if place[0] == "origin":
-                return dict(kinds=["dim_o", "dim_x", "dim_y"], pts=[other[1]])
+                return dict(kinds=["dim_x", "dim_y", "dim_o"], pts=[other[1]])  # (the same order: level, upright, aligned)
             return dict(kinds=["dim_y" if place == ("axis", "x") else "dim_x"], pts=[other[1]])
         a, b = [self.pts[k] for k in self.lines[other[1]]]
         level, upright = abs(a.y() - b.y()) < 1e-6, abs(a.x() - b.x()) < 1e-6
@@ -2503,22 +2523,34 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
             t["along"] = min(range(len(poly)), key=lambda k: _len(poly[k] - s)) / (len(poly) - 1)
 
     def _dim_type(self, t, m):
-        """The mouse chooses the kind: above or below the two points horizontal, beside them vertical, at a corner or
-        between them aligned. 15 px past a side before it changes; the space bar settles it (the user)."""
-        first = t["kinds"][0]
-        if t.get("settled") or first not in ("dim_len", "dim_o"):
+        """The mouse chooses the kind: above or below the two points horizontal, beside them vertical; at a corner or
+        between them the kind chosen stays (aligned only by the space bar). 15 px past a side before it changes; the
+        space bar settles it (the user)."""
+        kinds = t["kinds"]
+        names = {0: "dim_len", 1: "dim_dx", 2: "dim_dy"} if "dim_len" in kinds else \
+            {0: "dim_o", 1: "dim_x", 2: "dim_y"} if "dim_o" in kinds else None
+        if t.get("settled") or names is None or not all(n in kinds for n in names.values()):
             return
-        a, b = [self.pts[k] for k in t["pts"]] if first == "dim_len" else (P(0, 0), self.pts[t["pts"][0]])
+        a, b = [self.pts[k] for k in t["pts"]] if "dim_len" in kinds else (P(0, 0), self.pts[t["pts"][0]])
         x0, x1, y0, y1 = min(a.x(), b.x()), max(a.x(), b.x()), min(a.y(), b.y()), max(a.y(), b.y())
         if x1 - x0 < 1e-6 or y1 - y0 < 1e-6:
+            # one above the other, or side by side: the one distance there is (the level one comes first now, and
+            # between two points one above the other it is nothing)
+            # (a line's own length keeps Length first: there the first kind is the aligned one)
+            if kinds[0] != names[0] and x1 - x0 < 1e-6 <= y1 - y0:
+                t["i"] = kinds.index(names[2])
+            elif kinds[0] != names[0] and y1 - y0 < 1e-6 <= x1 - x0:
+                t["i"] = kinds.index(names[1])
             return
         dead = 15 / self.scale
         dx, dy = min(dead, (x1 - x0) / 4), min(dead, (y1 - y0) / 4)
         in_x, in_y = x0 + dx < m.x() < x1 - dx, y0 + dy < m.y() < y1 - dy
         out_x, out_y = m.x() < x0 - dead or m.x() > x1 + dead, m.y() < y0 - dead or m.y() > y1 + dead
-        way = 1 if in_x and out_y else 2 if in_y and out_x else 0 if (in_x and in_y) or (out_x and out_y) else None
+        # the pointer picks the level or the upright one only; at a corner or between the points the one chosen
+        # stays, the aligned one comes by the space bar (the user, 2026-11-20: aligned still came first)
+        way = 1 if in_x and out_y else 2 if in_y and out_x else None
         if way is not None:
-            t["i"] = way
+            t["i"] = kinds.index(names[way])
 
     def _dim_centre(self, t):
         if t.get("axis"):  # where the line, carried on, crosses the axis
@@ -2875,6 +2907,13 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         if self.tool == "constraint" and self.con_kind == "Symmetric" and len(self.con_picks) == 2 and self.mouse is not None \
                 and self.over is None:
             return self._dim_place_at(self.to_screen(self.mouse))
+        if self.tool == "constraint" and self.con_kind != "Symmetric" and self.mouse is not None and self.over is None \
+                and self.boxing is None and not self.con_ask:  # an axis or the origin lights where this constraint takes one
+            place = self._dim_place_at(self.to_screen(self.mouse))
+            return place if place is not None and place[0] in self._con_wanted() else None
+        if not self.tool and self.editing and self.mouse is not None and self.over is None and self.boxing is None \
+                and self.pasting is None and self.rotating is None:  # what a click would choose, lit as the figures are
+            return self._dim_place_at(self.to_screen(self.mouse))
         if self.tool != "dimension" or self.dim_panel.isVisible() or self.mouse is None or self.over is not None:
             return None
         if self.dim_new is not None and not (len(self.dim_picks) == 1 and self.dim_picks[0][0] == "line"):
@@ -2884,7 +2923,11 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
     def _paint_dim_picks(self, g, ink):
         """What is picked for a dimension stays lit: an axis too, or nothing shows it was taken (the user)."""
         hover = self._dim_axis_over()
-        picks = self.dim_picks + ([hover] if hover else []) + [q for q in self.con_picks if q[0] in ("axis", "origin")]
+        if self.boxing is not None and (not self.tool or (self.tool == "constraint" and self.con_kind != "Symmetric"
+                and "origin" in self._con_wanted())) and self._con_box_origin(self.boxing):
+            hover = ("origin", None)  # the frame will take the centre point: lit while it is pulled
+        picks = self.dim_picks + ([hover] if hover else []) + [q for q in self.con_picks + self.con_ask if q[0] in ("axis", "origin")] \
+            + sorted(self.sel_places, key=str)
         if not picks:
             return
         g.setBrush(QtCore.Qt.NoBrush)
@@ -4458,7 +4501,8 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
     def start_constraint(self, kind):
         """The tool first, then the clicks; what is chosen already is taken at once (the user)."""
         items = [("point", k) for k in sorted(self.sel_pts)] + [("line", i) for i in sorted(self.sel_lines)] + \
-            [("arc", i) for i in sorted(self.sel_arcs)] + [("ell", i) for i in sorted(self.sel_ells)]
+            [("arc", i) for i in sorted(self.sel_arcs)] + [("ell", i) for i in sorted(self.sel_ells)] + \
+            sorted(self.sel_places, key=str)
         self._end_chain()
         self._rect_reset()
         self.tool, self.con_kind = "constraint", kind
@@ -4501,14 +4545,21 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         self.setFocus()
         if self.con_ask:  # the question stands: what is clicked stays
             what = self._pick(s, {k for k, _i in self.con_ask})
+            if what is None and any(k in ("axis", "origin") for k, _i in self.con_ask):
+                what = self._dim_place_at(s)
             if what in self.con_ask:
                 rest = [x for x in self.con_ask if x != what]
                 self.con_ask = []
                 self._con_apply([what] + rest)
             return
-        what = self._pick(s, self._con_wanted())
+        wanted = self._con_wanted()
+        what = self._pick(s, wanted)
         if what is None and self.con_kind == "Symmetric" and len(self.con_picks) == 2:
             what = self._dim_place_at(s)  # the axes and their crossing count as mirrors
+        if what is None and {"axis", "origin"} & set(wanted):  # an axis or the origin, where this constraint takes one
+            place = self._dim_place_at(s)
+            if place is not None and place[0] in wanted:
+                what = place
         if what is None:
             at = self.to_model(s)
             self.boxing = dict(at=at, to=P(at), touch=False, add=False, lines=set(), arcs=set(), pts=set())
@@ -4544,9 +4595,16 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         lines, arcs = b["lines"] if "line" in kinds else set(), b["arcs"] if "arc" in kinds else set()
         pts = self._con_box_points(b) if "point" in kinds and not (lines or arcs) or "line" not in kinds and "arc" not in kinds \
             or self.con_kind in ("Coincident", "Symmetric") else set()
-        self._con_given([("point", k) for k in sorted(pts)] + [("line", i) for i in sorted(lines)] +
-                        [("arc", i) for i in sorted(arcs)])
+        items = [("point", k) for k in sorted(pts)] + [("line", i) for i in sorted(lines)] + [("arc", i) for i in sorted(arcs)]
+        if self._con_box_origin(b) and "origin" in kinds:  # the centre point inside the frame is taken like a point
+            items.append(("origin", None))
+        self._con_given(items)
         self._refresh()
+
+    def _con_box_origin(self, b):
+        x0, x1 = sorted((b["at"].x(), b["to"].x()))
+        y0, y1 = sorted((b["at"].y(), b["to"].y()))
+        return x0 <= 0 <= x1 and y0 <= 0 <= y1
 
     def _con_given(self, items):
         """Objects given together, in no order (a box, or chosen before the tool)."""
@@ -4555,7 +4613,10 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
                 continue
             for order in itertools.permutations(items):
                 if all(item[0] in slot for item, slot in zip(order, way)):
-                    if len(items) == 2:  # no first and second here: the program asks (the user)
+                    if len(items) == 2 and any(it[0] in ("axis", "origin") for it in order):
+                        # an axis or the centre point never moves: it stays, nothing to ask
+                        self._con_apply(sorted(order, key=lambda it: it[0] not in ("axis", "origin")))
+                    elif len(items) == 2:  # no first and second here: the program asks (the user)
                         self.con_ask = list(order)
                         self.prompt.emit(self.con_kind + "  Click what stays  ·  Esc gives it up")
                     else:
@@ -4633,6 +4694,8 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         name = self.con_kind
         tie = lambda kind, *pts, ref=None: dict(kind=kind, pts=list(pts), ref=ref, mark=name)
         a, b = items[0], items[-1]
+        if name != "Symmetric" and any(it[0] in ("axis", "origin") for it in items):  # (Symmetric has its own)
+            return self._con_axis_ties(items, tie)
         if name == "Coincident" and "ell" in (a[0], b[0]):
             point, ell = (a, b) if b[0] == "ell" else (b, a)
             return [tie("con_on_ell", point[1], *self.ells[ell[1]])]
@@ -4688,6 +4751,40 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
             return [tie("con_touch", t.pop(), c, la, lb)]
         return [tie("con_dist", c, s_, la, lb)]
 
+    def _con_axis_ties(self, items, tie):
+        """A constraint between a figure of the sketch and one of its axes or the origin, as ties (x0 / y0: a point on
+        the Y / X axis; the others as between points). Or a refusal, as text."""
+        name = self.con_kind
+        axis = next(it for it in items if it[0] in ("axis", "origin"))
+        kind, i = next(it for it in items if it is not axis)
+        if axis[0] == "origin":
+            if kind == "point" and name == "Coincident":
+                return [tie("x0", i), tie("y0", i)]
+            if kind == "point" and name == "Horizontal":
+                return [tie("y0", i)]  # level with the origin: on the X axis
+            if kind == "point" and name == "Vertical":
+                return [tie("x0", i)]  # upright to the origin: on the Y axis
+            if kind == "arc" and name in ("Coincident", "Concentric"):
+                c = self.arcs[i][0]
+                return [tie("x0", c), tie("y0", c)]  # its centre in the origin
+        else:
+            ax = axis[1]
+            on = "y0" if ax == "x" else "x0"  # on the X axis: y is 0
+            if kind == "point" and name == "Coincident":
+                return [tie(on, i)]
+            if kind == "line":
+                a_, b_ = self.lines[i]
+                if name in ("Coincident", "Collinear"):
+                    return [tie(on, a_), tie(on, b_)]  # the line lies on the axis
+                if name == "Parallel":
+                    return [tie("same_y" if ax == "x" else "same_x", a_, b_)]
+                if name == "Perpendicular":
+                    return [tie("same_x" if ax == "x" else "same_y", a_, b_)]
+            if kind == "arc" and name == "Tangent":
+                c, s_, _e = self.arcs[i]
+                return [tie("con_axis", c, s_, ref=ax)]
+        return "%s: not with that" % name
+
     def _con_apply(self, items):
         """The first stays, the rest comes to it; if it cannot, the first gives; neither: refused, nothing changes."""
         name = self.con_kind
@@ -4709,6 +4806,10 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
                 got = sk.same_x(*t["pts"])
             elif t["kind"] == "same_y":
                 got = sk.same_y(*t["pts"])
+            elif t["kind"] == "x0":
+                got = sk.x_is(t["pts"][0], 0.0)
+            elif t["kind"] == "y0":
+                got = sk.y_is(t["pts"][0], 0.0)
             elif t["kind"] in CONSTRAINT_TIES:
                 got = CONSTRAINT_TIES[t["kind"]](*t["pts"], *(() if t["ref"] is None else (t["ref"],)))
             else:
@@ -4726,6 +4827,8 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
             rest = {k for it in items[1:] for k in self._con_points(it)}
             if len(items) == 1:  # one line: its start stays, its end comes
                 first, rest = {self._con_points(items[0])[0]}, {self._con_points(items[0])[-1]}
+            if name != "Symmetric" and any(it[0] in ("axis", "origin") for it in items):  # an axis does not move: the figure comes to it
+                first, rest = set(), {k for it in items for k in self._con_points(it)}
             if name == "Symmetric":  # the first point stays, the second comes; the line is the axis
                 first = set(self._con_points(items[2])) | set(self._con_points(items[0]))
                 rest = set(self._con_points(items[1])) - first
@@ -5108,6 +5211,18 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
             if k is not None:
                 self.drag = dict(kind="dim", index=k, pts=(), state=self._state(), moved=False, pick=("dim", id(self.ties[k])), adding=adding)
                 return
+            place = self._dim_place_at(s)  # the centre point or an axis: chosen by a click, for a constraint
+            if place is not None:
+                if adding:
+                    self.sel_places ^= {place}
+                else:
+                    held = place in self.sel_places and len(self.sel_places) == 1 and not (
+                        self.sel_lines or self.sel_arcs or self.sel_ells or self.sel_spls or self.sel_pts or self.sel_dims)
+                    self._clear_choice()
+                    if not held:
+                        self.sel_places = {place}
+                self._refresh()
+                return
         if what is not None and what[0] == "point" and self.tab_point in self._stack(what[1]):
             what = ("point", self.tab_point)  # the one Tab lit
         if what is None:
@@ -5389,16 +5504,19 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         lines, arcs = (set(), set()) if small else self._in_box(b["at"], b["to"], b["touch"])
         log.say("box", "touching" if b["touch"] else "inside", log.pt(b["at"]), log.pt(b["to"]), "lines", len(lines),
                 "arcs", len(arcs))
+        centre = {("origin", None)} if not small and self._con_box_origin(b) else set()  # the centre point inside is taken
         if b["add"]:
             self.sel_lines |= lines
             self.sel_arcs |= arcs
             self.sel_ells |= self.box_ells
             self.sel_spls |= self.box_spls
+            self.sel_places |= centre
         else:
             self._clear_choice()
             self.sel_lines, self.sel_arcs = lines, arcs
             self.sel_ells = set(self.box_ells)
             self.sel_spls = set(self.box_spls)
+            self.sel_places = centre
         self.box_ells = set()
         self.box_spls = set()
         if not small:
@@ -5472,6 +5590,7 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         self.sel_ells = set()
         self.sel_spls = set()
         self.sel_dims = set()
+        self.sel_places = set()
         self.tab_point = None
 
     def set_dim(self, on):
@@ -6394,7 +6513,8 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
             self._delete()
             return
         if k == QtCore.Qt.Key_Escape and not self.tool and self.cur is None and \
-                (self.sel_lines or self.sel_arcs or self.sel_ells or self.sel_spls or self.sel_pts or self.sel_dims):
+                (self.sel_lines or self.sel_arcs or self.sel_ells or self.sel_spls or self.sel_pts or self.sel_dims
+                 or self.sel_places):
             self._clear_choice()
             self.update()
             return
