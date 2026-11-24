@@ -40,6 +40,7 @@ from prostocad.sketch_trim import TRIM_TOOLS, TrimTools
 
 P = QtCore.QPointF
 SNAP_PX = 8.0
+SPL_GROUP = 64  # a spline's pieces looked at in groups of this many by the magnets
 PICK_POINT_PX = 8.0  # a point is taken this near, before any line under it
 PICK_LINE_PX = 6.0
 RECT_NAMES = {"rect": "Rectangle", "rect_center": "Center Rectangle", "rect_3pt": "3-Point Rectangle",
@@ -1076,18 +1077,27 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         """(arc, centre, radius, mid angle) for every piece of every arc: lines and arcs crossing it or ending on it
         split it, as they split lines; each piece has its midpoint."""
         out = []
+        shapes = [self.arc_shape(i) for i in range(len(self.arcs))]
+        boxes = []  # each line's box: a line whose box stays off a circle's box cannot meet it (a drag was slow)
+        for ia, ib in self.lines:
+            a, b = self.pts[ia], self.pts[ib]
+            m = 1e-6 * (1.0 + _len(b - a))
+            boxes.append((min(a.x(), b.x()) - m, max(a.x(), b.x()) + m, min(a.y(), b.y()) - m, max(a.y(), b.y()) + m, a, b))
         for i in range(len(self.arcs)):
-            c, r, a0, sw = self.arc_shape(i)
+            c, r, a0, sw = shapes[i]
+            cx0, cx1, cy0, cy1 = c.x() - r, c.x() + r, c.y() - r, c.y() + r
             cuts = {0.0, sw}
-            for ia, ib in self.lines:
-                for _t, q in _seg_circle(self.pts[ia], self.pts[ib], c, r):
+            for x0, x1, y0, y1, pa, pb in boxes:
+                if x1 < cx0 or x0 > cx1 or y1 < cy0 or y0 > cy1:
+                    continue
+                for _t, q in _seg_circle(pa, pb, c, r):
                     d = (_ang(q - c) - a0) % TAU
                     if 1e-9 < d < sw - 1e-9:
                         cuts.add(d)
             for k in range(len(self.arcs)):
                 if k == i:
                     continue
-                c2, r2, b0, sw2 = self.arc_shape(k)
+                c2, r2, b0, sw2 = shapes[k]
                 for q in _circle_circle(c, r, c2, r2):
                     d = (_ang(q - c) - a0) % TAU
                     if 1e-9 < d < sw - 1e-9 and _in_sweep(_ang(q - c2), b0, sw2):
@@ -1251,15 +1261,71 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         Trim cannot make sense of them (the user: show it at once, warn before the sketch is closed). Worked out
         once until the sketch changes: every pair of lines at every paint, a sketch of 300 lines on a part's face
         hardly moved (the user, 2026-11-21)."""
-        key = (tuple((p.x(), p.y()) for p in self.pts), tuple(self.lines), tuple(self.constr))
+        pts = tuple((p.x(), p.y()) for p in self.pts)
+        shape = (tuple(self.lines), tuple(self.constr))
         kept = getattr(self, "_overlaps_kept", None)
-        if kept is not None and kept[0] == key:
-            return kept[1]
-        out = self._overlaps_find()
-        self._overlaps_kept = (key, out)
+        if kept is not None and kept[0] == pts and kept[1] == shape:
+            return kept[3]
+        if kept is not None and kept[1] == shape and len(kept[0]) == len(pts):
+            # a point dragged: only the pairs with a line on a moved point are worked out again (every pair of 300
+            # lines at every move was half of a drag's time)
+            moved = {k for k, (was, now) in enumerate(zip(kept[0], pts)) if was != now}
+            lines_moved = {i for i, (ia, ib) in enumerate(self.lines) if ia in moved or ib in moved}
+            pairs = {kj: q for kj, q in kept[2].items() if kj[0] not in lines_moved and kj[1] not in lines_moved}
+            normal = [i for i in range(len(self.lines)) if not self.is_construction(i)]
+            for i in lines_moved:
+                if self.is_construction(i):
+                    continue
+                for j in normal:
+                    if j == i or (j in lines_moved and j < i):
+                        continue
+                    k, j_ = min(i, j), max(i, j)
+                    q = self._overlap_piece(k, j_)
+                    if q is not None:
+                        pairs[(k, j_)] = q
+        else:
+            pairs = self._overlaps_find_pairs()
+        out = [pairs[kj] for kj in sorted(pairs)]
+        self._overlaps_kept = (pts, shape, pairs, out)
         return out
 
+    def _overlap_piece(self, k, j):
+        """The piece where normal lines k < j lie on each other, or None: the same sums as _overlaps_find."""
+        a, b = self.pts[self.lines[k][0]], self.pts[self.lines[k][1]]
+        u = b - a
+        n = _len(u)
+        if n < 1e-9:
+            return None
+        c, d = self.pts[self.lines[j][0]], self.pts[self.lines[j][1]]
+        if not (_dist_to_line(c, a, u, n) < 1e-6 and _dist_to_line(d, a, u, n) < 1e-6):
+            return None
+        t0, t1 = sorted((QtCore.QPointF.dotProduct(c - a, u) / n, QtCore.QPointF.dotProduct(d - a, u) / n))
+        lo, hi = max(0.0, t0), min(n, t1)
+        if hi - lo > 1e-6:
+            return (a + u * (lo / n), a + u * (hi / n))
+        return None
+
+    def _overlaps_find_pairs(self):
+        """{(k, j): piece} for every pair of normal lines k < j lying on each other."""
+        normal = [(i, self.pts[ia], self.pts[ib]) for i, (ia, ib) in enumerate(self.lines) if not self.is_construction(i)]
+        pairs = {}
+        for x in range(len(normal)):
+            k, a, b = normal[x]
+            u = b - a
+            n = _len(u)
+            if n < 1e-9:
+                continue
+            for j, c, d in normal[x + 1:]:
+                if not (_dist_to_line(c, a, u, n) < 1e-6 and _dist_to_line(d, a, u, n) < 1e-6):
+                    continue
+                t0, t1 = sorted((QtCore.QPointF.dotProduct(c - a, u) / n, QtCore.QPointF.dotProduct(d - a, u) / n))
+                lo, hi = max(0.0, t0), min(n, t1)
+                if hi - lo > 1e-6:
+                    pairs[(k, j)] = (a + u * (lo / n), a + u * (hi / n))
+        return pairs
+
     def _overlaps_find(self):
+        """The whole check, every pair (kept as it was: the tests compare the quick way with it)."""
         out = []
         normal = [(self.pts[ia], self.pts[ib]) for i, (ia, ib) in enumerate(self.lines) if not self.is_construction(i)]
         for k in range(len(normal)):
@@ -1453,15 +1519,20 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
                 continue
             poly = self.spl_poly(i)
             best = None
-            for p_, q_ in itertools.pairwise(poly):
-                u_ = q_ - p_
-                n2 = QtCore.QPointF.dotProduct(u_, u_)
-                if n2 < 1e-12:
+            # the curve's pieces in groups, each with its box: a group whose box is further than the magnet reaches
+            # holds no place it would take (thousands of pieces at every move slowed a drag)
+            for k0, x0, x1, y0, y1 in self._spl_boxes(poly):
+                if m.x() < x0 - tol or m.x() > x1 + tol or m.y() < y0 - tol or m.y() > y1 + tol:
                     continue
-                t_ = max(0.0, min(1.0, QtCore.QPointF.dotProduct(m - p_, u_) / n2))
-                at_ = p_ + u_ * t_
-                if best is None or _len(at_ - m) < _len(best - m):
-                    best = at_
+                for p_, q_ in itertools.pairwise(poly[k0:k0 + SPL_GROUP + 1]):
+                    u_ = q_ - p_
+                    n2 = QtCore.QPointF.dotProduct(u_, u_)
+                    if n2 < 1e-12:
+                        continue
+                    t_ = max(0.0, min(1.0, QtCore.QPointF.dotProduct(m - p_, u_) / n2))
+                    at_ = p_ + u_ * t_
+                    if best is None or _len(at_ - m) < _len(best - m):
+                        best = at_
             if best is not None:
                 add(4, best, "on_ell", "On spline", None)
         for i in range(len(self.ells)):
@@ -2066,6 +2137,22 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
             g.drawLine(b, tip)
             tips.append(tip)
         g.drawPolyline(QtGui.QPolygonF(tips))
+
+    def _spl_boxes(self, poly):
+        """[(first, x0, x1, y0, y1)]: the curve's pieces in groups of SPL_GROUP, each group's box; kept per curve."""
+        kept = self.__dict__.setdefault("_spl_boxes_kept", {})
+        got = kept.get(id(poly))
+        if got is not None and got[0] is poly:
+            return got[1]
+        boxes = []
+        for k0 in range(0, max(0, len(poly) - 1), SPL_GROUP):
+            xs = [q.x() for q in poly[k0:k0 + SPL_GROUP + 1]]
+            ys = [q.y() for q in poly[k0:k0 + SPL_GROUP + 1]]
+            boxes.append((k0, min(xs), max(xs), min(ys), max(ys)))
+        if len(kept) > 500:
+            kept.clear()
+        kept[id(poly)] = (poly, boxes)
+        return boxes
 
     def spl_poly(self, i):
         kind, pts, closed = self.spls[i]
@@ -2727,7 +2814,18 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         return -abs(v) if t.get("neg") else abs(v)
 
     def _dim_shape(self, t):
-        """How it stands on the screen: ("span", a, b, A, B), ("rad", a, b, both) or ("ang", points); None if nowhere."""
+        """How it stands on the screen: ("span", a, b, A, B), ("rad", a, b, both) or ("ang", points); None if nowhere.
+        While the dimensions are painted, each one's shape is worked out once (every dimension looking for a free side
+        worked out all the others again)."""
+        now = getattr(self, "_dim_shapes_now", None)
+        if now is None:
+            return self._dim_shape_find(t)
+        got = now.get(id(t))
+        if got is None or got[0] is not t:
+            got = now[id(t)] = (t, self._dim_shape_find(t))
+        return got[1]
+
+    def _dim_shape_find(self, t):
         kind, pts, off = self._dim_kind(t), t["pts"], t["off"]
         if kind in ("dim_x", "dim_y"):
             p = self.pts[pts[0]]
@@ -2895,12 +2993,16 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         snap = QtGui.QColor(self.p["snap"])
         light = self.p["name"] == "light"  # black there, placed or being placed (the user)
         over = self.ties[self.over[1]] if self.over is not None and self.over[0] == "dim" and self.over[1] < len(self.ties) else None
-        for t in self.dims():
-            lit = id(t) in self.sel_dims or t is over or t is self.dim_edit
-            self._dim_paint(g, t, None if light and t is self.dim_edit else snap if lit else self.state_ink("ref") if t.get("driven") else None)
-        self._paint_dim_picks(g, snap)
-        if self.dim_new is not None:
-            self._dim_paint(g, self.dim_new, None if light else self.p["accent"])
+        self._dim_shapes_now = {}  # nothing moves while they are painted: each shape worked out once
+        try:
+            for t in self.dims():
+                lit = id(t) in self.sel_dims or t is over or t is self.dim_edit
+                self._dim_paint(g, t, None if light and t is self.dim_edit else snap if lit else self.state_ink("ref") if t.get("driven") else None)
+            self._paint_dim_picks(g, snap)
+            if self.dim_new is not None:
+                self._dim_paint(g, self.dim_new, None if light else self.p["accent"])
+        finally:
+            self._dim_shapes_now = None
 
     def _dim_axis_over(self):
         """The axis or the centre point under the pointer, with Dimension on and nothing nearer: lit as a line is."""
@@ -6545,8 +6647,22 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
 
     # ----- painting -----
     def _arc_poly(self, c, r, a0, sweep):
-        n = max(8, int(abs(sweep) / TAU * 128))
-        return QtGui.QPolygonF([self.to_screen(_on_circle(c, r, a0 + sweep * k / n)) for k in range(n + 1)])
+        """The arc on the screen. Its points in the sketch are kept until it changes and are turned onto the screen in
+        one call (40 circles of 129 points each, worked out point by point at every paint, slowed a drag)."""
+        key = (c.x(), c.y(), r, a0, sweep)
+        kept = self.__dict__.setdefault("_arc_polys", {})
+        poly = kept.get(key)
+        if poly is None:
+            if len(kept) > 4000:
+                kept.clear()
+            n = max(8, int(abs(sweep) / TAU * 128))
+            poly = kept[key] = QtGui.QPolygonF([_on_circle(c, r, a0 + sweep * k / n) for k in range(n + 1)])
+        return self._screen_tf().map(poly)
+
+    def _screen_tf(self):
+        """to_screen as one transform."""
+        s, mx, h2 = self.scale, self._mid_x(), self.height() / 2
+        return QtGui.QTransform(s, 0, 0, -s, mx - self.center.x() * s, h2 + self.center.y() * s)
 
     def _grid_step(self):
         raw = 14.0 / self.scale
@@ -6637,9 +6753,19 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         dashed = QtGui.QPen(faint, 1.2, QtCore.Qt.CustomDashLine, QtCore.Qt.FlatCap) if self.dim_constr else \
             QtGui.QPen(QtGui.QColor(self.p["construction"]), 1.4, QtCore.Qt.CustomDashLine, QtCore.Qt.FlatCap)
         dashed.setDashPattern([6, 4])
+        run, run_pen = [], None  # lines one after another with the same pen: drawn in one call, in the same order
+        tf = self._screen_tf()
         for i, (ia, ib) in enumerate(self.lines):
-            g.setPen(dashed if self.is_construction(i) else pen(self.line_state.get(i, "free"), (ia, ib)))
-            g.drawLine(self.to_screen(self.pts[ia]), self.to_screen(self.pts[ib]))
+            pn = dashed if self.is_construction(i) else pen(self.line_state.get(i, "free"), (ia, ib))
+            if run and pn != run_pen:
+                g.setPen(run_pen)
+                g.drawLines(run)
+                run = []
+            run_pen = pn
+            run.append(tf.map(QtCore.QLineF(self.pts[ia], self.pts[ib])))
+        if run:
+            g.setPen(run_pen)
+            g.drawLines(run)
         g.setBrush(QtCore.Qt.NoBrush)
         for i in range(len(self.arcs)):
             g.setPen(dashed if self.is_arc_construction(i) else pen(self.arc_state.get(i, "free"), self.arcs[i]))
@@ -6866,22 +6992,49 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
                 max(c.x() for c in corners), max(c.y() for c in corners))
 
     def _paint_grid(self, g, w, h):
+        """Seen straight on, the grid is kept as a picture until the view, the size or the colours change: a point
+        dragged does not move it (drawn line by line it was a third of a paint). Turned in 3D: drawn as before."""
+        if self.tilt is not None:
+            return self._paint_grid_lines(g, w, h)
+        dev = g.device()
+        dpr = dev.devicePixelRatioF() if dev is not None else 1.0
+        key = (w, h, dpr, self.scale, self.center.x(), self.center.y(), self._mid_x(), self.p["grid"], self.p["grid_major"])
+        kept = getattr(self, "_grid_kept", None)
+        if kept is None or kept[0] != key:
+            pm = QtGui.QPixmap(max(1, round(w * dpr)), max(1, round(h * dpr)))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(QtCore.Qt.transparent)
+            gp = QtGui.QPainter(pm)
+            gp.setRenderHint(QtGui.QPainter.Antialiasing)
+            self._paint_grid_lines(gp, w, h)
+            gp.end()
+            kept = self._grid_kept = (key, pm)
+        g.drawPixmap(0, 0, kept[1])
+
+    def _paint_grid_lines(self, g, w, h):
         step = self._grid_step()
         x0, y0, x1, y1 = self._span(w, h)
         a, b = self.to_model(P(x0, y1)), self.to_model(P(x1, y0))
         while (b.x() - a.x()) / step + (b.y() - a.y()) / step > 1600:  # seen very slant: fewer lines, still the grid
             step *= 5
         minor, major = QtGui.QColor(self.p["grid"]), QtGui.QColor(self.p["grid_major"])
+        # minor and major lines each in one call (a line at a time cost a third of a paint); the vertical ones first,
+        # as before, so the level ones still lie over them
         i0, i1 = math.floor(a.x() / step), math.ceil(b.x() / step)
+        ups = ([], [])
         for i in range(i0, i1 + 1):
             x = self.to_screen(P(i * step, 0)).x()
-            g.setPen(QtGui.QPen(major if i % 5 == 0 else minor, 1))
-            g.drawLine(P(x, y0), P(x, y1))
+            ups[i % 5 == 0].append(QtCore.QLineF(x, y0, x, y1))
         j0, j1 = math.floor(a.y() / step), math.ceil(b.y() / step)
+        levels = ([], [])
         for j in range(j0, j1 + 1):
             y = self.to_screen(P(0, j * step)).y()
-            g.setPen(QtGui.QPen(major if j % 5 == 0 else minor, 1))
-            g.drawLine(P(x0, y), P(x1, y))
+            levels[j % 5 == 0].append(QtCore.QLineF(x0, y, x1, y))
+        for group in (ups, levels):
+            for k, ink in ((0, minor), (1, major)):
+                if group[k]:
+                    g.setPen(QtGui.QPen(ink, 1))
+                    g.drawLines(group[k])
 
     def _paint_curve(self, g, src):
         """The line or arc something now depends on, lit (Parallel, Tangent Arc)."""
