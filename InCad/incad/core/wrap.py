@@ -11,6 +11,8 @@ import math
 import FreeCAD as App
 import Part
 
+from incad.core import faceted
+
 ROUND_MSG = "Put the profile's sketch on a plane parallel to the cylinder's axis (a plane touching it, for example)"
 FLAT_MSG = "Pick a flat face parallel to the profile's sketch, or a round (cylindrical) face"
 FACE_MSG = "Pick a round (cylinder, cone or sphere) or a flat face of the part to emboss on"
@@ -478,7 +480,8 @@ def apply(shape, profile_faces, face, depth, engrave, spread=False, normal=None)
     cut = tools(profile_faces, face, -depth if engrave else depth, spread, normal, shape)
     before = len(shape.Solids)
     result = shape.cut(cut) if engrave else shape.fuse(cut)
-    result = result.removeSplitter()
+    if not faceted.is_faceted(shape):  # an STL's triangles are merged already, and merging thousands took half the time
+        result = result.removeSplitter()
     if engrave and len(result.Solids) > before:
         # cut right through a thin wall (a stencil): the middles of O, A, D come loose — they would fall out; the part
         # keeps its own pieces, the largest ones

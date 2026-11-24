@@ -345,6 +345,8 @@ class SketchSession:
                  for z in (bb.ZMin, bb.ZMax)}
         if len(sides) < 2:
             return False  # the box lies on one side: the plane misses it
+        if sketch.plane_between_vertices(shape, n, d):
+            return True  # (the whole section of a part made of an STL's triangles took 5 s at every opened sketch)
         try:
             return bool(shape.slice(n, d))
         except Exception:

@@ -893,6 +893,19 @@ def _right_angled(pts):
     return (sides[0] + sides[2]).Length < 1e-6 * max(size, 1.0) and (sides[1] + sides[3]).Length < 1e-6 * max(size, 1.0)
 
 
+def plane_between_vertices(shape, n, d, eps=1e-6):
+    """A solid of the shape has corners on both sides of the plane (points p with p.n = d): being one piece, the plane
+    runs through it. False says nothing (a ball has no corners beside its seam)."""
+    for s in shape.Solids:
+        over = under = False
+        for v in s.Vertexes:
+            h = v.Point.dot(n) - d
+            over, under = over or h > eps, under or h < -eps
+            if over and under:
+                return True
+    return False
+
+
 def add_rectangle_centres(sk, first=0, done=None, ours=None):
     """The user: a new rectangle gets a construction point in its middle, so one constraint (that point on the origin)
     makes it symmetric. The point is Symmetric between two opposite corners (a Rounded Rectangle's: its corner arcs'

@@ -393,6 +393,7 @@ class FeatureSession(QtCore.QObject):
                 elif getattr(self.kind, "NEEDS_PROFILE", True):
                     document.adopt(self.body, self.profile)  # a sketch left in another Solid comes along
                     try:
+                        self._note_bodies()
                         self.feature = self.kind.create(doc, self.body, self.profile, values)
                     except Exception:
                         if not self._picks_to_come(values):
@@ -1674,6 +1675,7 @@ class FeatureSession(QtCore.QObject):
                 self._retarget_from_values(values)
                 if self.profile is not None:
                     document.adopt(self.body, self.profile)
+                self._note_bodies()
                 self.feature = self.kind.create(self.doc, self.body, self.profile, values)
                 self._created_with = values.get("operation")
                 self._created_values = dict(values)
@@ -2007,10 +2009,26 @@ class FeatureSession(QtCore.QObject):
             log.report("warning", "Could not roll back the unfinished %s: %s" % (self.kind.TITLE, ex))
         self.feature = self.doc.getObject(self._feature_name) if self._feature_name else None
 
+    def _note_bodies(self):
+        """Before a create: the Solids that need no computing now, each with its Tip and the objects in it."""
+        self._bodies = {o.Name: (getattr(o.Tip, "Name", None), [m.Name for m in o.Group]) for o in self.doc.Objects
+                        if o.TypeId == "PartDesign::Body" and "Touched" not in o.State}
+
     def _drop_partial(self):
-        """A create that failed half-way may have left objects behind: roll them back, keep the step open."""
+        """A create that failed half-way may have left objects behind: roll them back, keep the step open. The object
+        made and taken back leaves its Solid touched; a Solid that is as it was (nothing in it touched or computed) is
+        not computed again (a Work Plane's window stood 2 s on a part of 7000 faces, each time it opened)."""
         try:
             self.doc.abortTransaction()
+            computed = getattr(self, "_computed", None)
+            if computed is not None and not getattr(self, "_moved_before_thread", False):
+                for name, (tip, group) in (getattr(self, "_bodies", None) or {}).items():
+                    b = self.doc.getObject(name)
+                    if b is not None and "Touched" in b.State and name not in computed.names \
+                            and getattr(b.Tip, "Name", None) == tip and [m.Name for m in b.Group] == group \
+                            and not any("Touched" in m.State or m.Name in computed.names for m in b.Group):
+                        b.purgeTouched()
+            self._bodies = None
             self.doc.recompute()
             model.relink(self.doc)
             self.doc.openTransaction(self.kind.TITLE)
