@@ -159,6 +159,7 @@ def read(sk):
     gid = lambda g_id: sk.getGeometryId(g_id) if g_id >= 0 else "ext:%d" % g_id
     ties = []
     ell_cut = []
+    mids = _middle_points(sk)  # {geo: (its line's geo, the Symmetric's index)}
     try:
         external = list(sk.ExternalGeo)
     except Exception:
@@ -244,6 +245,8 @@ def read(sk):
             rep.geo("point")
             k = pts.add(g.X, g.Y, (g_id, POS_START))
             shape[g_id] = ("point", k)
+            if g_id in mids:  # a middle point this sketch wrote: no Point of its own there (its `mid` tie, below)
+                continue
             if g_id >= 0:
                 ties.append(dict(kind="sk_point", pts=[k], ref=None, mark=None, gid=gid(g_id)))
             else:  # a projected vertex: a Point the part holds
@@ -475,6 +478,12 @@ def read(sk):
             else:
                 rep.con(t, MISSING, "Equal %s–%s" % (k1, k2))
             continue
+        if t == "Symmetric" and any(i == n for _line, n in mids.values()):
+            ties.append(dict(kind="mid", pts=[P(c.Third, c.ThirdPos)], ref=shape[mids[c.Third][0]][1], mark=None,
+                             gid=gid(c.Third)))
+            mapped.add(i)
+            rep.con(t, MAPPED, "the middle of a line")
+            continue
         if t == "Symmetric":
             a, b = P(c.First, c.FirstPos), P(c.Second, c.SecondPos)
             if not (isinstance(a, int) and isinstance(b, int)):
@@ -600,7 +609,7 @@ def read(sk):
             continue
         rep.con(t, MISSING, t)
 
-    ties += _stored_ties(sk, xy, rep)
+    ties += _stored_ties(sk, xy, rep, P)
     data = dict(version=1, units="mm", plane="xy", name=sk.Label, pts=xy, lines=lines, arcs=arcs, ells=ells,
                 constr=constr, arc_constr=arc_constr, ell_constr=ell_constr, relations=[], ties=ties, params=[],
                 dim_next=0, centre=(0.0, 0.0), scale=4.0, spls=spls, spl_constr=spl_constr, spl_comb=[],
@@ -612,9 +621,30 @@ def read(sk):
     return data, rep
 
 
-def _stored_ties(sk, xy, rep):
-    """The new sketch's ties Sketcher has no constraint for, written beside the sketch (STORE) with the places of
-    their points: each point found again where it stands (1e-6 mm); a tie whose point is gone is left out."""
+def _middle_points(sk):
+    """{point's geo: (line's geo, the Symmetric's index)}: the construction Points written for the middle of a line
+    (STORE "mids": their geometry ids), each still Symmetric between that line's two ends."""
+    import json
+    try:
+        ids = set(json.loads(getattr(sk, STORE, "") or "{}").get("mids", []))
+    except ValueError:
+        return {}
+    if not ids:
+        return {}
+    points = {i for i, g in enumerate(sk.Geometry) if g.TypeId == "Part::GeomPoint" and sk.getGeometryId(i) in ids}
+    out = {}
+    for n, c in enumerate(sk.Constraints):
+        if c.Type == "Symmetric" and c.Third in points and c.ThirdPos == POS_START and c.First == c.Second and c.First >= 0 \
+                and {c.FirstPos, c.SecondPos} == {POS_START, POS_END} and not c.Name \
+                and sk.Geometry[c.First].TypeId == "Part::GeomLineSegment":
+            out.setdefault(c.Third, (c.First, n))
+    return out
+
+
+def _stored_ties(sk, xy, rep, P):
+    """The new sketch's ties Sketcher has no constraint for, or that it would call redundant, written beside the
+    sketch (STORE) with the vertices ("at": geometry id, pos) and the places of their points: each point found by its
+    vertex, else where it stands (1e-6 mm); a tie whose point is gone is left out."""
     import json
     text = getattr(sk, "InCadSketchNext", "") or ""
     if not text:
@@ -624,9 +654,17 @@ def _stored_ties(sk, xy, rep):
     except ValueError:
         rep.notes.append("InCadSketchNext could not be read")
         return []
+    geo_of = {sk.getGeometryId(i): i for i in range(sk.GeometryCount)}
     out = []
     for t in stored:
         found = []
+        by = []
+        for v in t.get("at") or []:
+            k = P(geo_of[v[0]], v[1]) if v is not None and v[0] in geo_of else None
+            by.append(k if isinstance(k, int) else None)
+        if by and None not in by:
+            out.append(dict({k: v for k, v in t.items() if k not in ("xy", "at")}, pts=by))
+            continue
         for x, y in t.get("xy", []):
             k = min(range(len(xy)), key=lambda i: (xy[i][0] - x) ** 2 + (xy[i][1] - y) ** 2) if xy else None
             if k is None or math.hypot(xy[k][0] - x, xy[k][1] - y) > 1e-6:
@@ -636,7 +674,7 @@ def _stored_ties(sk, xy, rep):
         if found is None:
             rep.notes.append("a stored %s tie lost its points" % t.get("kind"))
             continue
-        out.append(dict({k: v for k, v in t.items() if k != "xy"}, pts=found))
+        out.append(dict({k: v for k, v in t.items() if k not in ("xy", "at")}, pts=found))
     return out
 
 
@@ -838,6 +876,29 @@ def _key_numbers(g):
     return []
 
 
+def _drop_redundant(sk, tie_of, done):
+    """What Sketcher calls redundant of the constraints written just now ({index: its tie}; Horizontal beside Collinear
+    with the X axis): the new sketch takes a constraint as long as it says something, Sketcher refuses the whole
+    sketch. The others hold it: it goes, and its tie (returned) is kept beside the sketch. Never a conflict."""
+    gone = []
+    while tie_of:
+        sk.solve()
+        sk.solve()  # (from the first one's exact places: a hair off, two collinear lines both level were not redundant yet)
+        if list(sk.ConflictingConstraints):
+            break
+        red = [i - 1 for i in sk.RedundantConstraints if i - 1 in tie_of]
+        if not red:
+            break
+        i = max(red)
+        t = tie_of.pop(i)
+        sk.delConstraint(i)
+        tie_of = {k - 1 if k > i else k: q for k, q in tie_of.items()}
+        if not any(q is t for q in gone):
+            gone.append(t)
+        done["redundant"] = done.get("redundant", 0) + 1
+    return gone
+
+
 def write(sk, data, force=False):
     """The sketch brought to `data` (the new sketch's dump): kept shapes (by their FreeCAD geometry id, data
     "shape_ids") change in place and keep their id; shapes gone are deleted; shapes drawn are added at the end; the
@@ -876,6 +937,17 @@ def write(sk, data, force=False):
     want = {kind: [g for g in data.get("shape_ids", {}).get(kind, [])] for kind in ("line", "arc", "ell", "spl")}
     keep_ids = {g for ids in want.values() for g in ids if g is not None}
     keep_ids |= {t.get("gid") for t in data["ties"] if t["kind"] == "sk_point" and t.get("gid") is not None}
+    # the middle of a line with nothing else on it (a rectangle's diagonal): a construction Point, as the old program's
+    # rectangle centre; a point some shape has already needs none
+    of_shapes = {k for key in ("lines", "arcs", "ells") for sh in data[key] for k in sh} | \
+        {k for sp in data.get("spls", []) for k in sp[1]} | \
+        {k for t in data["ties"] if t["kind"] in ("sk_point", "ell_cut") for k in t["pts"]}
+    middles, seen = [], set()
+    for t in data["ties"]:
+        if t["kind"] == "mid" and t["pts"][0] not in of_shapes and t["pts"][0] not in seen:
+            seen.add(t["pts"][0])
+            middles.append(t)
+    keep_ids |= {t.get("gid") for t in middles if t.get("gid") is not None}
     inner_of = {}
     for c in sk.Constraints:
         if c.Type == "InternalAlignment":
@@ -922,6 +994,8 @@ def write(sk, data, force=False):
     for t in data["ties"]:
         if t["kind"] == "sk_point":
             shapes.append(("point", t["pts"][0], False, t["ref"] if ext_ref(t.get("ref")) is not None else t.get("gid")))
+    for t in middles:
+        shapes.append(("point", t["pts"][0], True, t.get("gid")))
     geo = sk.Geometry
     replaced, added, slot = [], [], {}
     ext_kind = {}  # projected edge (its number now) -> construction wanted
@@ -1001,6 +1075,8 @@ def write(sk, data, force=False):
 
     C = Sketcher.Constraint
     out, named, kept_only = [], [], []
+    at_origin = set()  # the points held there by a Coincident: on the axes already
+    whose = []  # (index in out, the tie to keep beside the sketch when Sketcher calls that constraint redundant)
     free = {k for t in data["ties"] if t["kind"] == "free" for k in t["pts"]}
     # an end-to-end tangency is one Sketcher constraint (it joins the ends too): written so, as Sketcher makes it; a
     # Coincident beside a tangency of the edges made Sketcher call them redundant
@@ -1049,6 +1125,7 @@ def write(sk, data, force=False):
             gids = {(sk.getGeometryId(g), pos) for g, pos in vs if g >= 0}
             if gids & tied_origin or not gids & on_origin:  # tied there before, or new there
                 out.append(C("Coincident", first[0], first[1], -1, 1))  # a point on the origin is held there
+                at_origin.add(k)
     for k, (a, b) in ends.items():
         out.append(C("Tangent", a[0], a[1], b[0], b[1]))
     tan_ends = {id(t) for t in tan_ends}
@@ -1075,6 +1152,8 @@ def write(sk, data, force=False):
             a, b = V(p[0]), V(p[1])
             return [C(word, a[0], a[1], b[0], b[1])] if a and b else None
         if kind in ("x0", "y0"):
+            if p[0] in at_origin:
+                return []
             a = V(p[0])
             return [C("PointOnObject", a[0], a[1], V_AXIS if kind == "x0" else H_AXIS)] if a else None
         if kind in ("con_on_line", "slot_ray"):
@@ -1126,6 +1205,8 @@ def write(sk, data, force=False):
             if kind in ("mid", "slot_end", "centre_pt"):  # p in the middle of a and b
                 m, a, b = (p[0], *lines[ref]) if kind == "mid" else (p[0], p[1], p[2]) if kind == "slot_end" else (p[2], p[0], p[1])
                 va, vb, vm = V(a), V(b), V(m)
+                if t in middles and L(a, b) is not None:  # between the line's own ends (read back by them)
+                    va, vb = (L(a, b), POS_START), (L(a, b), POS_END)
                 return [C("Symmetric", va[0], va[1], vb[0], vb[1], vm[0], vm[1])] if va and vb and vm else None
             va, vb = V(p[0]), V(p[1])
             if not (va and vb):
@@ -1215,11 +1296,17 @@ def write(sk, data, force=False):
         if got is None:
             kept_only.append(t)
         else:
+            whose += [(len(out) + n, t) for n in range(len(got))]
             out += got
     for kind, line, _end, ref in data.get("relations", []):
         if line is None or line >= len(lines):
             continue
         g = L(*lines[line])
+        word = {"h": ("same_y", "Horizontal"), "v": ("same_x", "Vertical"), "perp": ("con_perp", "Perpendicular"),
+                "par": ("con_par", "Parallel")}.get(kind)
+        if word is not None:
+            other = [] if kind in ("h", "v") else lines[line - 1 if ref is None else ref]
+            whose.append((len(out), dict(kind=word[0], pts=[*lines[line], *other], ref=None, mark=word[1])))
         if kind in ("h", "v"):
             out.append(C("Horizontal" if kind == "h" else "Vertical", g))
         elif kind == "perp":
@@ -1235,10 +1322,22 @@ def write(sk, data, force=False):
     renum = {n: i for i, n in enumerate(keep_idx)}
     named = [(renum[n], t) for n, t in named]
     out = [out[n] for n in keep_idx]
-    first = sk.ConstraintCount
-    if out:
-        sk.addConstraint(out)
+    whose = [(renum[n], t) for n, t in whose if n in renum]
+    # the dimensions last: what is redundant is found without them, so a constraint never goes to make room for a
+    # dimension too many
+    dims = {n for n, _t in named}
+    order = [n for n in range(len(out)) if n not in dims] + sorted(dims)
+    renum = {n: i for i, n in enumerate(order)}
+    named = [(renum[n], t) for n, t in named]
+    whose = [(renum[n], t) for n, t in whose]
+    out = [out[n] for n in order]
     done["constraints"] = len(out)
+    first = sk.ConstraintCount
+    sk.addConstraint(out[:len(out) - len(dims)]) if len(out) > len(dims) else None
+    kept_only += _drop_redundant(sk, {first + n: t for n, t in whose}, done)
+    if dims:  # (they come after what is left)
+        first = sk.ConstraintCount - (len(out) - len(dims))
+        sk.addConstraint(out[len(out) - len(dims):])
     from incad.core import document, model
     unit = document.part_units(doc) or "mm"
     for n, t in named:
@@ -1261,12 +1360,18 @@ def write(sk, data, force=False):
         else:
             sk.setExpression(path, None)
 
-    # 4. what Sketcher has no constraint for: kept beside the sketch, by the places of its points
-    keep = [dict({k: x for k, x in t.items() if k != "n"}, xy=[list(pts[k]) for k in t["pts"]]) for t in kept_only]
-    if keep or STORE in sk.PropertiesList:
+    # 4. what Sketcher has no constraint for: kept beside the sketch, by its points' vertices and places
+    def vertex_ref(k):
+        v = next((v for v in verts.get(k, []) if v[0] >= 0), None)
+        return [sk.getGeometryId(v[0]), v[1]] if v is not None else None
+    keep = [dict({k: x for k, x in t.items() if k != "n"}, xy=[list(pts[k]) for k in t["pts"]],
+                 at=[vertex_ref(k) for k in t["pts"]]) for t in kept_only]
+    mid_ids = [sk.getGeometryId(slot[n]) for n, sh in enumerate(shapes) if sh[0] == "point" and n >= len(shapes) - len(middles)]
+    if keep or mid_ids or STORE in sk.PropertiesList:
         if STORE not in sk.PropertiesList:
             sk.addProperty("App::PropertyString", STORE, "InCad", "The new sketch's ties Sketcher has no constraint for")
-        setattr(sk, STORE, json.dumps(dict(version=1, ties=keep)) if keep else "")
+        setattr(sk, STORE, json.dumps(dict(dict(version=1, ties=keep), **({"mids": mid_ids} if mid_ids else {})))
+                if keep or mid_ids else "")
     done["kept_only"] = len(keep)
 
     # 5. the texts: Text objects beside the sketch, on its box's lines or its curve (by their geometry ids)

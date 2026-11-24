@@ -8,7 +8,8 @@ Newest build first. The build name is the name of the zip file.
 0.18.0
 ----
 - Test build (not released): the new sketch, the new feature windows, the Settings window.
-- New sketch: the X and Y axes and the origin take constraints; Dimension picks horizontal or vertical by the pointer, the space bar goes horizontal, vertical, aligned; a sketch with many lines is drawn about two and a half times faster, and a point dragged in it moves about five times faster.
+- New sketch: the X and Y axes and the origin take constraints; Dimension picks horizontal or vertical by the pointer, the space bar goes horizontal, vertical, aligned; a sketch with many lines is drawn faster, and a point dragged in it moves faster.
+- New sketch: a sketch with a constraint that only partly adds something (a horizontal side Collinear with an axis, a corner on the origin, the ends of an arc slot Collinear) is written; it was refused as having redundant constraints, and the changes were lost. The point in the middle of a rectangle's diagonal and of a slot's axis is kept in the file.
 
 
 0.17.5
