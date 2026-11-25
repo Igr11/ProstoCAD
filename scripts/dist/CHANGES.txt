@@ -11,6 +11,7 @@ Newest build first. The build name is the name of the zip file.
 - New sketch: the X and Y axes and the origin take constraints; Dimension picks horizontal or vertical by the pointer, the space bar goes horizontal, vertical, aligned; a sketch with many lines is drawn faster, and a point dragged in it moves faster.
 - On a part made of an STL's triangles a sketch opens faster, and Emboss no longer merges the part's faces, so it is faster.
 - A feature window opened with nothing picked (Work Plane, Work Axis, Work Point, Chamfer, Draft, Shell) no longer computes the part again, so on a heavy part it opens faster.
+- Revolve opens with Line, axis or edge and waits for the axis to be clicked; it no longer chooses one by itself.
 - New sketch: a sketch with a constraint that only partly adds something (a horizontal side Collinear with an axis, a corner on the origin, the ends of an arc slot Collinear) is written; it was refused as having redundant constraints, and the changes were lost. The point in the middle of a rectangle's diagonal and of a slot's axis is kept in the file.
 
 

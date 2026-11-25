@@ -43,23 +43,23 @@ class RevolveAxesTest(unittest.TestCase):
         self.assertAlmostEqual(f.Shape.Volume, 3.14159265 * (18 ** 2 - 10 ** 2) * 10, places=1)
         self.assertEqual(revolve.read(self.doc, f)["axis_mode"], "V_Axis")
 
-    def test_construction_lines_are_listed_and_one_is_the_default(self):
+    def test_construction_lines_are_listed_and_none_is_chosen_by_itself(self):
         sk = profile(self.body, self.xz, construction=[((5, -5), (5, 20))])
         self.assertEqual(revolve.construction_lines(sk), [("Axis0", "Line 5 · 25 mm, vertical (construction)")])
         values = revolve.defaults(self.doc, self.body, sk)
-        self.assertEqual((values["axis_mode"], values["axis_construction"]), ("construction", "Axis0"))
-        f = self.make(sk)
+        self.assertEqual((values["axis_mode"], values["axis_construction"]), ("reference", "Axis0"))
+        f = self.make(sk, axis_mode="construction")
         self.assertEqual(revolve.axis_name(f.ReferenceAxis[1][0]), "Axis0")  # FreeCAD stores it as 'Axis'
         self.assertAlmostEqual(f.Shape.Volume, 3.14159265 * (13 ** 2 - 5 ** 2) * 10, places=1)
         back = revolve.read(self.doc, f)
         self.assertEqual((back["axis_mode"], back["axis_construction"]), ("construction", "Axis0"))
 
-    def test_several_construction_lines_keep_the_sketch_axis_default_and_list_all(self):
+    def test_several_construction_lines_are_all_listed(self):
         sk = profile(self.body, self.xz, construction=[((5, -5), (5, 20)), ((0, 30), (40, 30))])
         lines = revolve.construction_lines(sk)
         self.assertEqual([v for v, _ in lines], ["Axis0", "Axis1"])
         self.assertIn("horizontal", lines[1][1])
-        self.assertEqual(revolve.defaults(self.doc, self.body, sk)["axis_mode"], "V_Axis")
+        self.assertEqual(revolve.defaults(self.doc, self.body, sk)["axis_mode"], "reference")
         self.assertEqual(revolve.options("axis_construction", {}, sk)[:2], lines)  # the profile's lines follow
         f = self.make(sk, axis_mode="construction", axis_construction="Axis1")
         self.assertEqual(f.ReferenceAxis[1], ["Axis1"])
@@ -68,7 +68,7 @@ class RevolveAxesTest(unittest.TestCase):
         """200 + 200 gave a 40 deg wedge without a word (OCC turns the total round past 360)."""
         sk = profile(self.body, self.xz)
         with self.assertRaises(ValueError) as cm:
-            self.make(sk, extent="two_angles", angle="200 °", angle2="200 °")
+            self.make(sk, axis_mode="V_Axis", extent="two_angles", angle="200 °", angle2="200 °")
         self.assertIn("more than a full turn", str(cm.exception))
 
     def test_a_side_of_the_profile_is_an_axis_too(self):
@@ -358,9 +358,9 @@ class RevolveProjectedAxisTest(unittest.TestCase):
         self.assertTrue(sketch.is_defining(sk, ext))
         self.assertGreater(f.Shape.Volume, 20 * 20 * 30 + 1)
 
-    def test_a_single_projected_line_is_the_default_axis(self):
+    def test_a_single_projected_line_is_ready_in_the_list(self):
         values = revolve.defaults(self.doc, self.body, self.sk)
-        self.assertEqual(values["axis_mode"], "construction")
+        self.assertEqual(values["axis_mode"], "reference")
         self.assertTrue(values["axis_construction"].startswith("ext"))
 
     def test_an_axis_on_a_projected_edge_follows_the_edge_when_the_part_changes(self):

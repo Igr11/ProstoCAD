@@ -27,8 +27,8 @@ class RevolveTest(unittest.TestCase):
 
     def test_full_revolve(self):
         v = revolve.defaults(self.doc, self.body, self.sk)
-        self.assertEqual((v["operation"], v["axis_mode"], v["extent"]), ("join", "V_Axis", "full"))
-        f = revolve.create(self.doc, self.body, self.sk, v)
+        self.assertEqual((v["operation"], v["axis_mode"], v["extent"]), ("join", "reference", "full"))  # no axis by itself
+        f = revolve.create(self.doc, self.body, self.sk, dict(v, axis_mode="V_Axis"))
         self.doc.recompute()
         self.assertEqual(f.TypeId, revolve.JOIN)
         self.assertAlmostEqual(f.Shape.Volume, math.pi * (6 ** 2 - 2 ** 2) * 4, places=2)
@@ -36,7 +36,7 @@ class RevolveTest(unittest.TestCase):
 
     def test_angle_parameter(self):
         f = revolve.create(self.doc, self.body, self.sk,
-                           dict(revolve.defaults(self.doc, self.body, self.sk), extent="angle", angle="90"))
+                           dict(revolve.defaults(self.doc, self.body, self.sk), axis_mode="V_Axis", extent="angle", angle="90"))
         self.doc.recompute()
         self.assertAlmostEqual(f.Angle.Value, 90)
         self.assertEqual(revolve.read(self.doc, f)["angle"], "90°")
@@ -50,7 +50,7 @@ class RevolveTest(unittest.TestCase):
         """New Solid (the user: instead of Auto, for a Boolean later): the profile and its revolve in a new Solid."""
         from incad.core import document
         f = revolve.create(self.doc, self.body, self.sk,
-                           dict(revolve.defaults(self.doc, self.body, self.sk), operation="new_solid"))
+                           dict(revolve.defaults(self.doc, self.body, self.sk), axis_mode="V_Axis", operation="new_solid"))
         self.doc.recompute()
         owner = f.getParentGeoFeatureGroup()
         self.assertEqual(f.TypeId, revolve.JOIN)

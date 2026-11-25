@@ -301,37 +301,13 @@ def options(key, values, profile=None):
 
 
 def defaults(doc, body, profile):
-    """The axis: the one construction / projected line the sketch has (drawn or projected for it), else a sketch
-    axis the profile lies beside (vertical first), else none: the dialog waits for a click on the axis instead of
-    starting with an axis through the profile."""
+    """The window opens with Line, axis or edge and waits for a click on the axis (the user, 2026-11-24: never an axis
+    chosen by itself); the list of the sketch's lines is ready for Line of the sketch."""
     values = {f.key: f.default for f in FIELDS}
     lines = axis_line_options(profile)
     if lines:
         values["axis_construction"] = lines[0][0]
-        if len(lines) - len(normal_lines(lines_sketch(profile))) == 1:
-            values["axis_mode"] = "construction"
-            return values
-    side = _beside_sketch_axis(profile)
-    if side is not None:
-        values["axis_mode"] = side
     return values
-
-
-def _beside_sketch_axis(profile):
-    """"V_Axis" or "H_Axis" when the profile lies on one side of it (touching it is fine), else None."""
-    sk = lines_sketch(profile)
-    shape = getattr(sk, "Shape", None)
-    if shape is None or shape.isNull() or not shape.Edges:
-        return None
-    flat = shape.copy()
-    flat.transformShape(sk.Placement.inverse().toMatrix())  # (the sketch's shape sits at its placement)
-    box = flat.BoundBox
-    eps = 1e-6
-    if box.XMin > -eps or box.XMax < eps:
-        return "V_Axis"
-    if box.YMin > -eps or box.YMax < eps:
-        return "H_Axis"
-    return None
 
 
 # ----- the axis -----
