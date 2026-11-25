@@ -145,6 +145,8 @@ def settle_cross_solid_sketches(doc):
     other Solid too). Each is settled as settle_support does. Returns the sketches changed."""
     changed = []
     for b in bodies(doc):
+        if not any(o.TypeId == "Sketcher::SketchObject" and _foreign_support(o, b) is not None for o in b.Group):
+            continue  # (every step's shape copied for nothing: 3 s at opening a part made of an STL's triangles)
         old = {f.Name: f.Shape.copy() for f in b.Group
                if f.isDerivedFrom("PartDesign::Feature") and not f.Shape.isNull()}
         places = {o.Name: App.Placement(o.Placement) for o in b.Group if o.TypeId == "Sketcher::SketchObject"}
