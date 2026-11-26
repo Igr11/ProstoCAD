@@ -7,7 +7,11 @@ Newest build first. The build name is the name of the zip file.
 
 0.18.0
 ----
-- Test build (not released): the new sketch, the new feature windows, the Settings window.
+- The sketch is ProstoCAD's own now, quick on big sketches: magnets to ends, middles, centres, crossings and the part's edges, guides from points the pointer rests on, size boxes at the pointer (Tab holds a size), the space bar to switch what a tool does, a right-click ring, Tangent Arc, Rotate, copy and paste, Dim Construction Lines, a Polygon of any number of sides, Cancel Sketch. Files of earlier versions open in it as they are.
+- The feature windows are ProstoCAD's own: in cards, a size pulled by its dot or stepped by the wheel and the arrow keys; hints in grey, errors in red.
+- Spur Gears: with gear 2 sized by Ratio, a wanted Center distance can be typed; the window shows the pair that keeps the Ratio and comes nearest it at a standard module, from module 2 down (Smaller module), and Use sets that module and the teeth. Fewer than 17 teeth on the smaller gear are said (the tooth root is undercut).
+- Move Face: the Neighbours choice Inventor is called Smart.
+- Settings are one panel under the gear button: theme, text sizes, how dimensions look, the sketch's colours and cursor, grid and snap, projected edges, the right-click menu and the rest.
 - New sketch: the X and Y axes and the origin take constraints; Dimension picks horizontal or vertical by the pointer, the space bar goes horizontal, vertical, aligned; a sketch with many lines is drawn faster, and a point dragged in it moves faster.
 - On a part made of an STL's triangles a sketch opens faster, and Emboss no longer merges the part's faces, so it is faster.
 - A feature window opened with nothing picked (Work Plane, Work Axis, Work Point, Chamfer, Draft, Shell) no longer computes the part again, so on a heavy part it opens faster.
