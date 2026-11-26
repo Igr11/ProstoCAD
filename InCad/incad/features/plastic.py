@@ -17,6 +17,7 @@ import math
 import FreeCAD as App
 import Part
 
+from incad.core import faceted
 from incad.features.common import Field, fine_step, format_picks, parse_picks, resolve, value_param, value_text
 from incad.threads import inserts
 from incad.core import offset2d
@@ -377,7 +378,8 @@ def _numbers(text):
 
 def _fused(base, made):
     shape = base.fuse(made) if not isinstance(made, Part.Compound) else base.fuse(made.Solids)
-    shape = shape.removeSplitter()
+    if not faceted.is_faceted(base):  # an STL's triangles: nothing to merge, and looking took 9 s every value
+        shape = shape.removeSplitter()
     return shape.Solids[0] if len(shape.Solids) == 1 else shape
 
 
@@ -538,7 +540,7 @@ def _create(kind):
             if kind == "lip" and values.get("type") == "groove":
                 f.Label = "Groove"
             body.Tip = f
-            doc.recompute()
+            doc.recompute([f, f.getParentGeoFeatureGroup()])  # (what is built on this Solid follows on OK)
             document.show_like(f, tip)
             if "Invalid" in f.State:
                 raise ValueError(f.getStatusString() or "The %s could not be made" % TITLES[kind].lower())
@@ -546,8 +548,7 @@ def _create(kind):
             body.removeObject(f)
             doc.removeObject(f.Name)
             body.Tip = tip
-            doc.recompute()
-            raise
+            raise  # the step is taken back by the caller, its Solid with it
         sk = getattr(f, "Sketch", None)
         if sk is not None:
             document.set_visibility([sk], False)
@@ -560,7 +561,7 @@ def _update(kind):
         _apply(doc, f, values, kind)
         if kind == "lip":
             f.Label = "Groove" if values.get("type") == "groove" else "Lip"
-        doc.recompute()
+        doc.recompute([f, f.getParentGeoFeatureGroup()])  # (what is built on this Solid follows on OK)
         return f
     return update
 

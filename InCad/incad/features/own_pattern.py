@@ -344,7 +344,7 @@ def _finished(f, shape, base, touches):
         if not known:
             known.append(extrude_solid._faulty(base))
         return known[0]
-    shape, _sound = extrude_solid._finished(shape, refine, many, base_faulty)
+    shape, _sound = extrude_solid._finished(shape, refine, many, base_faulty, base=base)
     return shape
 
 

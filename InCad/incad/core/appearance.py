@@ -95,13 +95,13 @@ def _face_props(faces):
     return props
 
 
-def find_face(faces, entry, tol):
+def find_face(faces, entry, tol, props=None):
     """The index of the face of `faces` the entry stands for, or None: the same area at the same place; else the same
     area facing the same way (a face moved by a longer Extrude); else facing the same way, nearest, not far."""
     c, a = App.Vector(*entry["c"]), entry["a"]
     n = App.Vector(*entry["n"]) if entry.get("n") else None
     same_area, same_way = [], []
-    for i, (kind, centre, area, normal) in enumerate(_face_props(faces)):
+    for i, (kind, centre, area, normal) in enumerate(_face_props(faces) if props is None else props):
         if entry.get("t") and kind != entry["t"]:
             continue
         d = (centre - c).Length
@@ -146,8 +146,9 @@ def wanted(body, rec=None):
     faces = shape.Faces
     mats = [base] * len(faces)
     tol = _tolerance(shape)
+    props = _face_props(faces)  # (once: telling the faces apart by their hashes for every entry took longer than all)
     for e in entries:
-        i = find_face(faces, e, tol)
+        i = find_face(faces, e, tol, props)
         if i is not None:
             mats[i] = look(e["color"], e.get("finish") or DEFAULT_FINISH)
     return mats, edges

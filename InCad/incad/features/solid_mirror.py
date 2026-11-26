@@ -219,7 +219,9 @@ def sound(solid):
     meet on a common edge, as our Extrude does it: the kernel called it valid, the full check faulty (faces crossing
     themselves) and a later Shell or Fillet failed there. The solid as it was when that doesn't help."""
     try:
-        from incad.core.extrude_solid import _faulty, _glued
+        from incad.core.extrude_solid import MANY_FACES, _faulty, _glued
+        if len(solid.Faces) > MANY_FACES:  # an STL's triangles: not looked at, as Extrude (a minute and a half for a
+            return solid                   # mirrored copy, and gluing found nothing)
         return (_glued(solid) or solid) if _faulty(solid) else solid  # (_glued gives None when it can't)
     except Exception:
         return solid
@@ -386,7 +388,7 @@ def _create_into_itself(doc, source, link, result, values):
         f.Plane = link
         source.Tip = f
         document.show_like(f, tip)
-        doc.recompute()
+        doc.recompute([f, source])  # the rest of the part follows on OK
         if "Invalid" in f.State:
             raise ValueError(f.getStatusString() or "The mirror could not be made")
         document.show_result(source)
@@ -394,8 +396,7 @@ def _create_into_itself(doc, source, link, result, values):
         source.removeObject(f)
         doc.removeObject(f.Name)
         source.Tip = tip
-        doc.recompute()
-        raise
+        raise  # the step is taken back by the caller, its Solid with it
     return f
 
 

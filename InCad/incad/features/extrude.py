@@ -485,7 +485,7 @@ def create(doc, body, profile, values):
     f.Profile = profile
     _apply(doc, f, values)
     if operation == "join" and before:
-        doc.recompute()
+        doc.recompute([f, target])  # (what is built on this Solid follows on OK: a lid cut by the part took 5 s here)
         if _solids(f) > before and _touches(f):  # some of it joins the part: it stays a Join (one profile on the part,
             from incad.core import log           # one beside it went into a new Solid of two lumps before)
             log.report("warning", "%s: a shape of its profile doesn't reach into the part (it lies beside it, or "

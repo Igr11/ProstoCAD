@@ -562,11 +562,25 @@ def update(doc, f, values):
     return f
 
 
+_last = []  # [(base shape, sketch shape, places, the pieces)] of the last cut: a Split's own computing and the sharing
+# out of its pieces to their Solids ask for the same ones
+
+
+def _cut(shape, sk, body):
+    place = [repr(x.getGlobalPlacement().toMatrix().A) for x in (sk, body) if x is not None]
+    for s, k, p, cut in _last:
+        if s.isSame(shape) and k.isSame(sk.Shape) and p == place:
+            return [c.copy() for c in cut]
+    cut = _slice(shape, _knives(sk, body, shape.BoundBox))
+    _last[:] = [(shape, sk.Shape, place, [c.copy() for c in cut])]
+    return cut
+
+
 def all_pieces(f, before=None):
     """The pieces the sketch cuts the part before the Split into, the gap taken off (largest first)."""
     base = f.BaseFeature
-    knives = _knives(f.Sketch, f.getParentGeoFeatureGroup(), base.Shape.BoundBox)
-    cut = _slice(base.Shape, knives)
+    body = f.getParentGeoFeatureGroup()
+    cut = _cut(base.Shape, f.Sketch, body)
     if before is not None and len(cut) <= before:
         raise ValueError("The sketch does not cut the part")
     gap = f.Gap.Value if hasattr(f, "Gap") else 0.0  # a Split saved before Gap has none

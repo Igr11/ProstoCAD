@@ -257,7 +257,7 @@ def create(doc, body, profile, values):
     try:
         _build(doc, f, values)
         body.Tip = f
-        doc.recompute()
+        doc.recompute([f, f.getParentGeoFeatureGroup()])  # (what is built on this Solid follows on OK)
         document.show_like(f, tip)
         if "Invalid" in f.State:
             raise ValueError(f.getStatusString() or "The faces could not be moved")
@@ -265,8 +265,7 @@ def create(doc, body, profile, values):
         body.removeObject(f)
         doc.removeObject(f.Name)
         body.Tip = tip
-        doc.recompute()
-        raise
+        raise  # the step is taken back by the caller, its Solid with it
     return f
 
 
@@ -313,7 +312,7 @@ def read(doc, f):
 
 def update(doc, f, values):
     _build(doc, f, values)
-    doc.recompute()
+    doc.recompute([f, f.getParentGeoFeatureGroup()])
     if "Invalid" in f.State:
         raise ValueError(f.getStatusString() or "The faces could not be moved")
     return f

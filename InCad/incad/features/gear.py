@@ -663,7 +663,7 @@ def _create(kind, name):
             try:
                 _apply(doc, f, values, kind)
                 target.Tip = f
-                doc.recompute()
+                doc.recompute([f, f.getParentGeoFeatureGroup()])  # (what is built on this Solid follows on OK)
                 document.show_like(f, tip)
                 if "Invalid" in f.State:
                     raise ValueError(f.getStatusString() or "The %s could not be made" % name.lower())
@@ -671,7 +671,6 @@ def _create(kind, name):
                 target.removeObject(f)
                 doc.removeObject(f.Name)
                 target.Tip = tip
-                doc.recompute()
                 raise
             before = len(tip.Shape.Solids) if tip is not None and not tip.Shape.isNull() else 0
             if attempt or not before or len(f.Shape.Solids) <= before:
@@ -690,7 +689,7 @@ def _create(kind, name):
 def _update(kind):
     def update(doc, f, values):
         _apply(doc, f, values, kind)
-        doc.recompute()
+        doc.recompute([f, f.getParentGeoFeatureGroup()])
         return f
     return update
 

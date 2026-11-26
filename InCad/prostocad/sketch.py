@@ -23,6 +23,7 @@ import ast
 import math
 import re
 
+import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from prostocad import dimension, log, sketch_solve as sk, theme, units
@@ -258,6 +259,39 @@ def _seg_circle(a, b, c, r):
         if -1e-9 <= t <= 1 + 1e-9:
             out.append((t, a + d * t))
     return out
+
+
+class _Near:
+    """Which of these segments come near a box or a circle: a quick look at all of them at once before the exact
+    crossing of each (a hundred lines against a spline's pieces took a sixth of a second at every click)."""
+    EPS = 1e-6
+
+    def __init__(self, segs):
+        self.a = np.array([(p.x(), p.y()) for p, _q in segs], float).reshape(-1, 2)
+        self.b = np.array([(q.x(), q.y()) for _p, q in segs], float).reshape(-1, 2)
+        self.lo, self.hi = np.minimum(self.a, self.b) - self.EPS, np.maximum(self.a, self.b) + self.EPS
+
+    def box(self, p, q, start=0):
+        x0, x1 = min(p.x(), q.x()), max(p.x(), q.x())
+        y0, y1 = min(p.y(), q.y()), max(p.y(), q.y())
+        lo, hi = self.lo[start:], self.hi[start:]
+        return (np.nonzero((lo[:, 0] <= x1) & (hi[:, 0] >= x0) & (lo[:, 1] <= y1) & (hi[:, 1] >= y0))[0] + start).tolist()
+
+    def boxes(self, segs):
+        """(index in segs, index here) of every pair whose boxes meet."""
+        other = _Near(segs)
+        meet = np.all((other.lo[:, None, :] <= self.hi[None]) & (other.hi[:, None, :] >= self.lo[None]), axis=2)
+        return np.argwhere(meet).tolist()
+
+    def circle(self, c, r):
+        m = np.array((c.x(), c.y()))
+        d = self.b - self.a
+        n2 = np.maximum((d * d).sum(axis=1), 1e-30)
+        t = np.clip(((m - self.a) * d).sum(axis=1) / n2, 0.0, 1.0)
+        near = np.hypot(*(self.a + d * t[:, None] - m).T)
+        far = np.maximum(np.hypot(*(self.a - m).T), np.hypot(*(self.b - m).T))
+        slack = self.EPS + 1e-6 * (r + far)
+        return np.nonzero((near <= r + slack) & (far >= r - slack))[0].tolist()
 
 
 def _circle_circle(c1, r1, c2, r2):
@@ -1629,9 +1663,11 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
             return self.crossings_kept[1]
         out = []
         ends = [(self.pts[a], self.pts[b]) for a, b in self.lines]
+        near = _Near(ends)
         for i in range(len(self.arcs)):  # where an arc meets a line or another arc
             c, r, a0, sw = self.arc_shape(i)
-            for j, (a, b) in enumerate(ends):
+            for j in near.circle(c, r):
+                a, b = ends[j]
                 for t, q in _seg_circle(a, b, c, r):
                     if 1e-9 < t < 1 - 1e-9 and _in_sweep(_ang(q - c), a0, sw, -1e-9):
                         out.append((q, "x", ("arc", i, j)))
@@ -1641,22 +1677,24 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
                     if _in_sweep(_ang(q - c), a0, sw, -1e-9) and _in_sweep(_ang(q - c2), b0, sw2, -1e-9):
                         out.append((q, "x", ("arcs", i, k)))
         for i, (a, b) in enumerate(ends):  # where two lines cross
-            for j in range(i + 1, len(ends)):
+            for j in near.box(a, b, i + 1):
                 hit = _cross(a, b, *ends[j])
                 if hit is not None and 1e-9 < hit[0] < 1 - 1e-9 and 1e-9 < hit[1] < 1 - 1e-9:
                     out.append((hit[2], "x", (i, j)))
         for i in range(len(self.spls)):  # where lines cross a spline
-            for p_, q_ in itertools.pairwise(self.spl_poly(i)):
+            pieces = list(itertools.pairwise(self.spl_poly(i)))
+            for k, j in near.boxes(pieces):  # piece by piece, the lines in their order
+                p_, q_ = pieces[k]
                 u_ = q_ - p_
-                for a_, b_ in ends:
-                    w_ = b_ - a_
-                    det = u_.x() * w_.y() - u_.y() * w_.x()
-                    if abs(det) > 1e-12:
-                        d_ = a_ - p_
-                        s_ = (d_.x() * w_.y() - d_.y() * w_.x()) / det
-                        r_ = (d_.x() * u_.y() - d_.y() * u_.x()) / det
-                        if 0 <= s_ <= 1 and 0 <= r_ <= 1:
-                            out.append((p_ + u_ * s_, "ell_x", None))
+                a_, b_ = ends[j]
+                w_ = b_ - a_
+                det = u_.x() * w_.y() - u_.y() * w_.x()
+                if abs(det) > 1e-12:
+                    d_ = a_ - p_
+                    s_ = (d_.x() * w_.y() - d_.y() * w_.x()) / det
+                    r_ = (d_.x() * u_.y() - d_.y() * u_.x()) / det
+                    if 0 <= s_ <= 1 and 0 <= r_ <= 1:
+                        out.append((p_ + u_ * s_, "ell_x", None))
         self.crossings_kept = (key, out)
         return out
 
@@ -1670,6 +1708,7 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
         if self.spans_kept is not None and self.spans_kept[0] == key:
             return self.spans_kept[1]
         out = []
+        near = _Near([(self.pts[a], self.pts[b]) for a, b in self.lines])
         for i, (ia, ib) in enumerate(self.lines):
             a, b = self.pts[ia], self.pts[ib]
             u = b - a
@@ -1677,7 +1716,8 @@ class SketchView(TrimTools, SlotTools, PolygonTools, MoveTools, TextTools, Corne
             if n2 < 1e-12:
                 continue
             ts = {0.0, 1.0}  # a point lying on the line does not split it (the user): only a crossing line does
-            for j, (ja, jb) in enumerate(self.lines):  # where another line crosses it splits it too (the user)
+            for j in near.box(a, b):  # where another line crosses it splits it too (the user)
+                ja, jb = self.lines[j]
                 if j != i:
                     hit = _cross(a, b, self.pts[ja], self.pts[jb])
                     if hit is not None and 1e-9 < hit[0] < 1 - 1e-9:

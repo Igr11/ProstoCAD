@@ -3,7 +3,7 @@ the transaction is aborted, the model recomputed back to its previous state, and
 import traceback
 from dataclasses import dataclass, field
 
-from incad.core import faceted, log
+from incad.core import faceted, log, settle, soundness
 
 _depth = 0
 _busy = None
@@ -68,7 +68,7 @@ def _valid(obj, shape, checked=None):
     key = getattr(tip if tip is not None else obj, "Name", None)
     if checked is not None and key is not None and key in checked:
         return True
-    ok = shape.isValid()
+    ok = soundness.valid(shape)
     if ok and checked is not None and key is not None:
         checked.add(key)
     return ok
@@ -173,11 +173,7 @@ def _whole_part_cut(obj):
 
 def _faulty(shape):
     """True when the full check finds faults in `shape` (faces that cross themselves, edges off their faces)."""
-    try:
-        shape.check(True)
-        return False
-    except Exception:
-        return True
+    return soundness.faulty(shape)
 
 
 def _faulty_base(obj):
@@ -247,29 +243,28 @@ def unsound(obj):
             _has_modeled_thread(getattr(obj, "BaseFeature", None)) or hasattr(obj, "InCadThread") or \
             (obj.TypeId == "PartDesign::Hole" and getattr(obj, "ModelThread", False)):  # (a Coil is looked at)
         return ""
-    try:
-        shape.check(True)
+    base = getattr(getattr(obj, "BaseFeature", None), "Shape", None)
+    if not soundness.faulty(shape, base):
         return ""
-    except Exception:
-        if _faulty_base(obj):  # the fault was there before it (a STEP's solid): no worse than its part, not this
-            return ""          # feature's to answer for (the message stays for a feature that fails outright)
-        if obj.TypeId in _EDGES:
-            return ("%s leaves a faulty spot (tiny edges or faces that cross where it meets another face): a later "
-                    "feature may fail there. Try a slightly different size" % obj.Label)
-        if obj.TypeId.endswith("Helix"):
-            return ("%s runs through itself (its turns touch or overlap, or its profile crosses the axis): make the "
-                    "pitch larger than the profile is high, or move the profile off the axis" % obj.Label)
-        if obj.TypeId in _SWEPT:
-            return ("%s runs through itself somewhere (a path that bends tighter than the profile is wide, or a "
-                    "closed loft that comes back across itself): a later feature may fail on it. Make the profile "
-                    "smaller, the bends wider, or the loft open" % obj.Label)
-        if obj.TypeId in ("PartDesign::Pad", _JOINS[-1]):
-            return _why_invalid(obj) or ("%s touches the part only along a line or at a point somewhere: a later "
-                                         "feature may fail there. Make it reach a little into the part, or keep it "
-                                         "clear" % obj.Label)
-        return ("%s leaves a wall of no thickness somewhere (the cut touches a side along a line, or at a point): "
-                "it can't be printed, and a later fillet or shell may fail there. Move the profile a little into "
-                "the side, or clear of it" % obj.Label)
+    if _faulty_base(obj):  # the fault was there before it (a STEP's solid): no worse than its part, not this
+        return ""          # feature's to answer for (the message stays for a feature that fails outright)
+    if obj.TypeId in _EDGES:
+        return ("%s leaves a faulty spot (tiny edges or faces that cross where it meets another face): a later "
+                "feature may fail there. Try a slightly different size" % obj.Label)
+    if obj.TypeId.endswith("Helix"):
+        return ("%s runs through itself (its turns touch or overlap, or its profile crosses the axis): make the "
+                "pitch larger than the profile is high, or move the profile off the axis" % obj.Label)
+    if obj.TypeId in _SWEPT:
+        return ("%s runs through itself somewhere (a path that bends tighter than the profile is wide, or a "
+                "closed loft that comes back across itself): a later feature may fail on it. Make the profile "
+                "smaller, the bends wider, or the loft open" % obj.Label)
+    if obj.TypeId in ("PartDesign::Pad", _JOINS[-1]):
+        return _why_invalid(obj) or ("%s touches the part only along a line or at a point somewhere: a later "
+                                     "feature may fail there. Make it reach a little into the part, or keep it "
+                                     "clear" % obj.Label)
+    return ("%s leaves a wall of no thickness somewhere (the cut touches a side along a line, or at a point): "
+            "it can't be printed, and a later fillet or shell may fail there. Move the profile a little into "
+            "the side, or clear of it" % obj.Label)
 
 
 _DRESSUPS = ("PartDesign::Fillet", "PartDesign::Chamfer", "PartDesign::Thickness", "PartDesign::Draft")
@@ -832,10 +827,13 @@ def run_safely(label, fn, doc=None, only=None, quiet_broken=False):
         doc.UndoMode = 1
     broken_before = snapshot_broken(doc)
     links = link_snapshot(doc)
+    was = settle.touched(doc)
     names_before = {o.Name for o in doc.Objects}
     watch_esc()
     _depth += 1
     doc.openTransaction(label)
+    added = settle.Added(doc) if only is not None else None
+    done = False
     try:
         value = fn()
         if callable(only):  # the objects to recompute known only from what fn made (a new sketch)
@@ -850,13 +848,14 @@ def run_safely(label, fn, doc=None, only=None, quiet_broken=False):
         found = broken_now(doc, broken_before, {o.Name for o in only} if only else touched)
         if found:
             raise _InvalidResult("; ".join(why for _n, why in found), [n for n, _why in found])
+        done = True
     except Exception as e:
         try:
             bases = dressup_bases(doc, {o.Name for o in doc.Objects if o.Name not in names_before
                                         or "Touched" in o.State})
         except Exception:
             bases = set()
-        doc.abortTransaction()
+        settle.aborted(doc, doc.abortTransaction, was)
         doc.recompute()
         heal_bases(doc, bases)
         _relink(doc)
@@ -867,5 +866,8 @@ def run_safely(label, fn, doc=None, only=None, quiet_broken=False):
         return SafeResult(False, error=msg, broken=e.names if invalid else [])
     finally:
         _depth -= 1
+        if added is not None:
+            added.close(done)
+    settle.note_failed(doc)
     doc.commitTransaction()
     return SafeResult(True, value)

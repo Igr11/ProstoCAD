@@ -12,6 +12,11 @@ Newest build first. The build name is the name of the zip file.
 - On a part made of an STL's triangles a sketch opens faster, and Emboss no longer merges the part's faces, so it is faster.
 - A feature window opened with nothing picked (Work Plane, Work Axis, Work Point, Chamfer, Draft, Shell) no longer computes the part again, so on a heavy part it opens faster.
 - A heavy part is ready sooner after opening.
+- Undo and Redo no longer compute the part again: what they bring back is already there, so they are almost instant on a heavy part. Cancel of a feature window and of a sketch, and Finish Sketch with nothing changed, the same.
+- OK of an operation, Hole, patterns and Mirror Solid on a heavy part: only the faces the step made are checked, so they are ready sooner.
+- The first click on a face of a part with many steps answers sooner.
+- Boss on a part made of an STL's triangles no longer merges its faces; Split cuts the part once instead of twice.
+- New sketch: a sketch with splines answers the clicks sooner.
 - Revolve opens with Line, axis or edge and waits for the axis to be clicked; it no longer chooses one by itself.
 - New sketch: a sketch with a constraint that only partly adds something (a horizontal side Collinear with an axis, a corner on the origin, the ends of an arc slot Collinear) is written; it was refused as having redundant constraints, and the changes were lost. The point in the middle of a rectangle's diagonal and of a slot's axis is kept in the file.
 

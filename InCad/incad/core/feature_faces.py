@@ -9,7 +9,8 @@ import Part
 TOL = 1e-5
 _index = {}  # (shape hash, kind) -> [(enlarged box, element)] of a shape's elements
 _points = {}  # (shape hash, kind) -> [(geometry type, a point inside)] of a shape's elements
-_print_sets = {}  # (shape hash, kind) -> {fingerprint} of a shape's elements
+_print_sets = {}  # (shape hash, kind) -> {box: elements} of a shape
+_print_lists = {}  # (shape hash, kind) -> {fingerprint} of a shape's elements
 _tips = {}  # (feature, kind, shape hashes) -> on_tip's names
 
 
@@ -88,12 +89,15 @@ def _box(el):
 
 
 def _boxes(shape, kind):
+    """[a box surely holding the element, the element, its exact box once asked for]: the quick first look. BoundBox follows the display's
+    triangles, which cut inside a curve (see _box), so it is widened by more than they can; the exact boxes of every
+    face of every step took 4-10 s at the first click on a face."""
     def make():
         out = []
         for o in _elements(shape, kind):
-            bb = _box(o)
-            bb.enlarge(TOL * 10)
-            out.append((bb, o))
+            bb = o.BoundBox
+            bb.enlarge(0.5 + 0.25 * bb.DiagonalLength)
+            out.append([bb, o, None])
         return out
     return _cached(_index, shape, kind, make)
 
@@ -108,13 +112,27 @@ def _fingerprint(el, kind):
     """What makes an element the same one in another feature's shape: geometry type, corners, edge count, box. Shapes
     read from a file share no elements, and projecting a point onto a wrapped letter's spline took 4 ms a face."""
     r = lambda x: round(x, 4)
-    bb = el.BoundBox
     return (_geom_type(el, kind), len(el.Edges), tuple(sorted((r(v.X), r(v.Y), r(v.Z)) for v in el.Vertexes)),
-            tuple(r(x) for x in (bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax)))
+            _print_box(el))
+
+
+def _print_box(el):
+    bb = el.BoundBox
+    return tuple(round(x, 4) for x in (bb.XMin, bb.YMin, bb.ZMin, bb.XMax, bb.YMax, bb.ZMax))
 
 
 def _prints(shape, kind):
-    return _cached(_print_sets, shape, kind, lambda: {_fingerprint(e, kind) for e in _elements(shape, kind)})
+    return _cached(_print_lists, shape, kind, lambda: {_fingerprint(e, kind) for e in _elements(shape, kind)})
+
+
+def _has_print(fp, shape, kind):
+    """Has the shape an element of this fingerprint? Its box first, the rest only of those of the same box."""
+    def make():
+        out = {}
+        for e in _elements(shape, kind):
+            out.setdefault(_print_box(e), []).append(e)
+        return out
+    return any(_fingerprint(e, kind) == fp for e in _cached(_print_sets, shape, kind, make).get(fp[3], ()))
 
 
 def _on_any(point, t, shape, kind, among=None):
@@ -122,8 +140,14 @@ def _on_any(point, t, shape, kind, among=None):
     type and distance only for the few elements whose box holds the point."""
     boxes = _boxes(shape, kind)
     for i in (range(len(boxes)) if among is None else among):
-        bb, o = boxes[i]
-        if bb.isInside(point) and _geom_type(o, kind) == t and _lies_on(point, o, kind):
+        entry = boxes[i]
+        o = entry[1]
+        if not entry[0].isInside(point) or _geom_type(o, kind) != t:
+            continue
+        if entry[2] is None:
+            entry[2] = _box(o)
+            entry[2].enlarge(TOL * 10)
+        if entry[2].isInside(point) and _lies_on(point, o, kind):
             return True
     return False
 
@@ -156,13 +180,13 @@ def _brought(feature, point, t, kind, fp=None):
     shape = _shape(feature)
     if shape is None:
         return False
-    if not (fp is not None and fp in _prints(shape, kind)) and not _on_any(point, t, shape, kind):
+    if not (fp is not None and _has_print(fp, shape, kind)) and not _on_any(point, t, shape, kind):
         return False
     base = getattr(feature, "BaseFeature", None)
     base_shape = _shape(base) if base is not None else None
     if base_shape is None:
         return True
-    if fp is not None and fp in _prints(base_shape, kind):
+    if fp is not None and _has_print(fp, base_shape, kind):
         return False
     return not _on_any(point, t, base_shape, kind)
 

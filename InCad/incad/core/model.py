@@ -412,7 +412,7 @@ def rename_model_parameter(doc, old, new):
 _TARGET = re.compile(r"(?<![\w.])([A-Za-z_][A-Za-z0-9_]*)\.")
 
 
-def relink(doc):
+def relink(doc, compute=True):
     """Repair formula links after undo/abort. FreeCAD (probed) drops the dependency of an object it restores, so the
     object stops following its parameters; clearing and setting the formula again re-registers it.
     Returns the names of the objects repaired."""
@@ -428,7 +428,7 @@ def relink(doc):
             obj.setExpression(path.lstrip("."), None)
             obj.setExpression(path.lstrip("."), expr)
         repaired.append(obj.Name)
-    if repaired:
+    if repaired and compute:
         doc.recompute()
     return repaired
 

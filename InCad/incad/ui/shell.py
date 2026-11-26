@@ -8,7 +8,7 @@ import time
 import traceback
 
 from incad import host
-from incad.core import commands, faceted, log, perf, prefs, safe
+from incad.core import commands, faceted, log, perf, prefs, safe, settle, soundness
 from incad.qt import dispose, QAction, QtCore, QtGui, QtWidgets
 from incad.ui import fresh_redraw, ribbon_layout
 from incad.ui import theme as themes
@@ -85,6 +85,7 @@ class _DocObserver:
 
     def slotDeletedDocument(self, doc):
         self.callback()
+        settle.forget(getattr(doc, "Name", ""))
         if self.delete_callback is not None:
             self.delete_callback(doc)
 
@@ -106,6 +107,7 @@ class _DocObserver:
 
     def slotChangedObject(self, obj, prop):
         self.callback()
+        settle.note_change(obj, prop)
         if prop == "BaseFeature":  # a feature put into a Solid: no Refine on an STL's triangles
             faceted.base_changed(obj)
         if prop == "ExternalGeometry" and self.projection_callback is not None \
@@ -125,8 +127,14 @@ class _DocObserver:
     def slotRedoDocument(self, doc):
         self.slotUndoDocument(doc)
 
+    def slotRecomputedObject(self, obj):
+        if getattr(obj, "TypeId", "") in safe._DRESSUPS:
+            soundness.forget()
+
     def slotRecomputedDocument(self, doc):
         self.callback()
+        if not getattr(doc, "HasPendingTransaction", False):  # (a window's try: noted when it is kept, at its OK)
+            settle.note_failed(doc)
         if any(o.TypeId == "Sketcher::SketchObject" and "InCadPlaneCuts" in o.PropertiesList
                for o in getattr(doc, "Objects", ())):  # lines where a plane cuts a sketch: moved with the plane
             QtCore.QTimer.singleShot(0, lambda d=doc: _follow_plane_cuts(d))
@@ -2124,7 +2132,7 @@ class Shell(QtCore.QObject):
         the text only on the next full recompute — while the sketch is open, after Finish. Many changes in a row
         (a drag) rebuild once."""
         from incad.features import sketch_text
-        if not sketch_text.texts_of(sk):
+        if settle.taking_back() or not sketch_text.texts_of(sk):  # (an undo puts the Text back with its sketch)
             return
         due = self.__dict__.setdefault("_texts_due", set())
         key = (sk.Document.Name, sk.Name)

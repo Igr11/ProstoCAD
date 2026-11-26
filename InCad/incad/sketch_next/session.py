@@ -347,6 +347,8 @@ class Session(Windows, Menu, Project):
         from incad.sketch_next import convert
         self.sk, self.on_change = sk, on_change
         self.fresh = bool(fresh) and sk.Document.UndoNames[:1] == ["New Sketch"]
+        from incad.core import settle
+        self._quiet = settle.Quiet(sk.Document)
         self._undo_at_open = len(sk.Document.UndoNames)  # the document's steps while the sketch is open (an edge
         # projected, a point tied to the part) are taken back by Cancel
         self.view = Gui.getDocument(sk.Document.Name).ActiveView
@@ -895,27 +897,28 @@ class Session(Windows, Menu, Project):
         it back)."""
         doc = self.sk.Document
         fresh = self.fresh
-        r = self.finish(write=False)
+        from incad.core import settle
+        r = self.finish(write=False, compute=False)
         try:
             for _ in range(max(0, len(doc.UndoNames) - self._undo_at_open)):
-                doc.undo()
+                settle.take_back(doc, doc.undo, self._quiet.failed)
             if fresh and doc.UndoNames[:1] == ["New Sketch"]:
                 import FreeCADGui as Gui
                 Gui.Selection.clearSelection()
-                doc.undo()
-            doc.recompute()
+                settle.take_back(doc, doc.undo, self._quiet.failed)
+            settle.recompute(doc, self._quiet.failed)
         except Exception:
             log.logger().exception("new sketch: Cancel")
         if self.on_change is not None:
             self.on_change()
         return r
 
-    def finish(self, write=True):
+    def finish(self, write=True, compute=True):
         """The sketch written back (one undo step; nothing when nothing changed), the layer gone, the camera turned
         back as it was. write=False: Cancel."""
         global _CURRENT
         import FreeCAD as App
-        from incad.core import safe
+        from incad.core import safe, settle
         from incad.sketch_next import convert
         lay = self.layer
         self._poly_draw_end()
@@ -926,7 +929,8 @@ class Session(Windows, Menu, Project):
             lay.stop_tool()
         data = lay.dump()
         doc = self.sk.Document
-        if not write or self._unchanged():  # Cancel, or nothing changed: no step of its own in the history
+        unchanged = not write or self._unchanged()
+        if unchanged:  # Cancel, or nothing changed: no step of its own in the history
             r = safe.SafeResult(True)
         else:
             r = safe.run_safely("Edit Sketch", lambda: convert.write(self.sk, data), doc)
@@ -955,7 +959,9 @@ class Session(Windows, Menu, Project):
                 t.ViewObject.Visibility = self.texts_shown.get(t.Name, True)
             except Exception:
                 pass
-        doc.recompute()
+        self._quiet.untouch()
+        if compute:  # (Cancel does it, when it has taken the steps back)
+            settle.recompute(doc, self._quiet.failed if unchanged else ())
 
         def back():
             try:

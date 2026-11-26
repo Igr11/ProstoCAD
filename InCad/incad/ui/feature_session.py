@@ -2,7 +2,7 @@
 import time
 import traceback
 
-from incad.core import document, faceted, log, model, perf, safe
+from incad.core import document, faceted, log, model, perf, safe, settle
 from incad.qt import dispose, QtCore, QtWidgets
 from incad.ui.feature_dialog import FeatureDialog
 
@@ -377,6 +377,8 @@ class FeatureSession(QtCore.QObject):
         self._undo_mark = doc.UndoCount  # Cancel undoes back to here: a Sketcher command run meanwhile (Delete
         if not self.creating:  # every document's undo step opens before anything changes   on a copy) makes
             self._join_documents(self.kind.read(doc, self.feature))  # FreeCAD commit the dialog's own pending step
+        self._failed = settle.invalid(doc)
+        self._was = settle.touched(doc)  # what was out of step when the window opened (settle.aborted)
         doc.openTransaction(self.kind.TITLE)
         if self._areas is not None:
             self._areas.ensure()  # inside the step (see _AreaChoice)
@@ -1785,7 +1787,7 @@ class FeatureSession(QtCore.QObject):
         if self._areas is not None:
             self._areas.apply()
             self._areas.ensure()
-        self.doc.recompute()
+        _recompute_sound(self.doc)
 
     def _before_thread(self):
         """A cut or join through a modeled thread breaks in the kernel: it goes before the thread, which is made after
@@ -1973,12 +1975,10 @@ class FeatureSession(QtCore.QObject):
         A feature put before a thread moved the thread: then everything is computed as before."""
         before = {o.Name for o in self.doc.Objects if "Touched" in o.State}
         bases = safe.dressup_bases(self.doc, [self.feature.Name]) if _feature_alive(self.feature) else set()
-        values = model._model_obj(self.doc)
-        if values is not None and not getattr(self, "_moved_before_thread", False):
-            with model.changing_values(self.doc, values):  # the values recomputed alone, their users left as they are
-                self.doc.abortTransaction()
-        else:
+        if getattr(self, "_moved_before_thread", False):
             self.doc.abortTransaction()
+        else:
+            self._abort_settled()
         safe.heal_bases(self.doc, bases)  # a refused fillet left the shape it was built on invalid
         computed = getattr(self, "_computed", None)
         if computed is None or getattr(self, "_moved_before_thread", False):
@@ -1990,6 +1990,23 @@ class FeatureSession(QtCore.QObject):
                 except Exception:
                     pass
 
+    def _abort_settled(self):
+        """The step aborted; what was settled when the window opened is left so (a step a Sketcher command committed
+        meanwhile is undone by Cancel, not here: then everything is computed as FreeCAD marks it)."""
+        values = model._model_obj(self.doc)
+
+        def step():
+            if values is not None:
+                with model.changing_values(self.doc, values):  # the values alone, their users left as they are
+                    self.doc.abortTransaction()
+            else:
+                self.doc.abortTransaction()
+        mark = getattr(self, "_undo_mark", None)
+        if mark is None or self.doc.UndoCount - bool(self.doc.HasPendingTransaction) > mark:
+            step()
+        else:
+            settle.aborted(self.doc, step, self._was)
+
     def _recover_deleted_feature(self):
         """An update() that swaps a feature's type (Join<->Cut) deletes the old one, then may fail before it
         returns the new one — self.feature is left pointing at a deleted object and the next preview would crash.
@@ -2000,8 +2017,8 @@ class FeatureSession(QtCore.QObject):
             self.feature = None
             return
         try:
-            self.doc.abortTransaction()
-            self.doc.recompute()
+            self._abort_settled()
+            settle.recompute(self.doc, self._failed)
             model.relink(self.doc)
             self.doc.openTransaction(self.kind.TITLE)
             self._abort_extras(reopen=True)
@@ -2019,7 +2036,10 @@ class FeatureSession(QtCore.QObject):
         made and taken back leaves its Solid touched; a Solid that is as it was (nothing in it touched or computed) is
         not computed again (a Work Plane's window stood 2 s on a part of 7000 faces, each time it opened)."""
         try:
-            self.doc.abortTransaction()
+            if getattr(self, "_moved_before_thread", False):
+                self.doc.abortTransaction()
+            else:
+                self._abort_settled()
             computed = getattr(self, "_computed", None)
             if computed is not None and not getattr(self, "_moved_before_thread", False):
                 for name, (tip, group) in (getattr(self, "_bodies", None) or {}).items():
@@ -2029,7 +2049,7 @@ class FeatureSession(QtCore.QObject):
                             and not any("Touched" in m.State or m.Name in computed.names for m in b.Group):
                         b.purgeTouched()
             self._bodies = None
-            self.doc.recompute()
+            settle.recompute(self.doc, self._failed)
             model.relink(self.doc)
             self.doc.openTransaction(self.kind.TITLE)
             self._abort_extras(reopen=True)
@@ -2054,9 +2074,7 @@ class FeatureSession(QtCore.QObject):
     def _abort_extras(self, reopen):
         for d in list(self._extra):
             try:
-                d.abortTransaction()
-                d.recompute()
-                model.relink(d)
+                settle.take_back(d, d.abortTransaction)
                 if reopen:
                     d.openTransaction(self.kind.TITLE)
             except Exception as e:
@@ -2373,6 +2391,7 @@ class FeatureSession(QtCore.QObject):
         try:
             if commit:
                 self._roll_forward(True)  # inside the step: the later features' new shapes are part of it
+                settle.note_failed(self.doc)
                 self.doc.commitTransaction()
                 for d in self._extra:
                     d.commitTransaction()
@@ -2381,8 +2400,8 @@ class FeatureSession(QtCore.QObject):
                 self._abort_step()
                 mark = getattr(self, "_undo_mark", None)
                 while mark is not None and self.doc.UndoCount > mark:  # steps committed under the dialog
-                    self.doc.undo()
-                self.doc.recompute()
+                    settle.take_back(self.doc, self.doc.undo, self._failed)
+                settle.recompute(self.doc, self._failed)
                 model.relink(self.doc)  # objects restored by the abort lose their formula links (FreeCAD quirk)
                 self._abort_extras(reopen=False)
                 self._roll_forward(False)

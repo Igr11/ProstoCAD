@@ -1429,16 +1429,14 @@ def _linked_steps(doc, step, redo):
     """A dialog that changed several files (assembly cuts) left one step in each, which FreeCAD marks "-> name":
     undo/redo them together."""
     import FreeCAD as App
-    from incad.core import model
+    from incad.core import settle
     base = step[3:] if step.startswith("-> ") else step
     for other in App.listDocuments().values():
         if other is doc:
             continue
         names = other.RedoNames if redo else other.UndoNames
         if names and (names[0] == "-> " + base or (step.startswith("-> ") and names[0] == base)):
-            other.redo() if redo else other.undo()
-            other.recompute()
-            model.relink(other)
+            settle.take_back(other, other.redo if redo else other.undo)
 
 
 def update_model():
@@ -1479,6 +1477,7 @@ def _undo_redo(redo):
     """Undo/Redo the active document. Sketcher's own command while a sketch is edited; otherwise straight on the
     document, so it works whatever tab is active (FreeCAD's Std_Undo talks to the active view)."""
     import FreeCAD as App
+    from incad.core import settle
     from incad.ui import shell
     sh = shell.instance()
     fs = sh.feature_session if sh is not None else None
@@ -1496,9 +1495,10 @@ def _undo_redo(redo):
     names = doc.RedoNames if redo else doc.UndoNames
     step = names[0] if names else None
     if step is not None:
-        doc.redo() if redo else doc.undo()
+        settle.take_back(doc, doc.redo if redo else doc.undo)
         _linked_steps(doc, step, redo)
-    doc.recompute()
+    if any("Touched" in o.State for o in doc.Objects):
+        doc.recompute()
     from incad.core import document, log
     try:
         document.apply_visibility(doc)  # Hide / Show choices restored by the step show again (Visibility is not recorded)

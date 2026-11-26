@@ -21,6 +21,8 @@ import math
 import FreeCAD as App
 import Part
 
+from incad.core import soundness
+
 LIN = 1e-6  # mm: a point on a plane, a face in the profile's plane
 VOL_REL = 1e-6  # a result's volume within this part of the volumes it is made of
 FUZZY = (1e-6, 1e-5, 1e-4)  # mm: the Boolean's fuzzy values, tried in turn after the plain one
@@ -412,12 +414,8 @@ def _on_face(base, tool_shape, faces, origin, d, cut, common):
     return _sew(others + rest + walls)
 
 
-def _faulty(shape):
-    try:
-        shape.check(True)
-        return False
-    except Exception:
-        return True
+def _faulty(shape, base=None):
+    return soundness.faulty(shape, base)
 
 
 def _glued(solid):
@@ -449,19 +447,19 @@ def _glued(solid):
     return None
 
 
-def _finished(shape, refine, many, base_faulty, glue=True):
+def _finished(shape, refine, many, base_faulty, glue=True, base=None):
     """(shape, sound): the result refined when asked, and sound to the full check where it can be: refined, then
     as it is, each glued (see _glued) when faulty. OCC's Refine merged the two halves of a round wall a disc cut
     inscribed in a face leaves, past the line where it touches the side, and that came out faulty. A big part (an
     STL's triangles) isn't looked at; on a faulty part (base_faulty() true) nothing more is tried: the part is
     healed first (see combine)."""
     refined = _refined(shape) if refine else shape
-    if many or not _faulty(refined):
+    if many or not _faulty(refined, base):
         return refined, True
     if base_faulty():
         return refined, False
     for s in ([refined, shape] if refined is not shape else [shape]):
-        if s is not refined and not _faulty(s):
+        if s is not refined and not _faulty(s, base):
             return s, True
         if not glue:
             continue
@@ -694,7 +692,7 @@ def _combine(base, tool_shape, operation, faces, origin, d, refine):
         if not right:
             continue
         made = shape
-        shape, sound = _finished(made, refine, many, base_faulty, glue=False)
+        shape, sound = _finished(made, refine, many, base_faulty, False, None if operation == "intersect" else base)
         if sound or base_faulty():
             return shape, how, sound  # (a faulty part: healed and made again, see combine)
         first = first or (shape, how, False)
