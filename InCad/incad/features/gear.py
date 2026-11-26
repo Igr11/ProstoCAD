@@ -817,6 +817,9 @@ _SECOND = (
     Field("size2", "Size by", "choice", _SECOND_SIZE, "ratio", show_if=("make", ("pair",))),
     Field("teeth2", "Teeth", "value_length", default="30", show_if=(("make", ("pair",)), ("size2", ("teeth",)))),
     Field("ratio", "Ratio", "value_length", default="1.5", show_if=(("make", ("pair",)), ("size2", ("ratio",)))),
+    # Ratio held, a wanted centre distance: a pair suggested, Use and Smaller module (the user, 2026-11-27)
+    Field("want_distance", "Center distance", "value_length", default="",
+          show_if=(("make", ("pair",)), ("size2", ("ratio",)))),
     Field("distance", "Center distance", "value_length", default="50 mm",
           show_if=(("make", ("pair",)), ("size2", ("distance",)))),
     Field("width2", "Width", "value_length", default="10 mm", show_if=("make", ("pair",))),
@@ -864,7 +867,7 @@ WORMSET_FIELDS = (
     _head("h_second", "Wheel", show_if=("make", ("pair",))),
 ) + tuple(f if f.key != "ratio" else Field("ratio", "Ratio", "value_length", default="30",
                                             show_if=(("make", ("pair",)), ("size2", ("ratio",))))
-    for f in _SECOND if f.key != "around2") + _PLACE  # a wheel sits across its worm: no Around
+    for f in _SECOND if f.key not in ("around2", "want_distance")) + _PLACE  # a wheel sits across its worm: no Around
 
 _PLACE_KEYS = ("turn", "offset_x", "offset_y", "offset_z", "rotate_x", "rotate_y", "center", "plane", "axis",
                "reverse", "mesh", "around")
@@ -996,6 +999,31 @@ def _pair_info(values):
         return ""
 
 
+def _pair_suggestion(values, step):
+    """Spur Gears, a pair sized by Ratio with a Center distance wanted: the pair gears.suggest finds at the step's
+    module, its words, the values Use sets (the module, gear 1's teeth) and whether a smaller module is left; None
+    when no Center distance is given."""
+    if values.get("make") != "pair" or values.get("size2") != "ratio" or (values.get("mesh") or ""):
+        return None
+    try:
+        want = _number(values.get("want_distance"))
+        ratio = _number(values.get("ratio"))
+        helix = _number(values.get("helix")) or 0.0
+    except Exception:
+        return None
+    if not want or want <= 0:
+        return None
+    got = gears.suggest(ratio, want, helix, step)
+    if got is None:
+        return None
+    words = "Module %g · %d : %d teeth · center distance %g mm (Ratio %g)" % (
+        got["module"], got["teeth1"], got["teeth2"], round(got["distance"], 4), round(got["ratio"], 4))
+    if got["warn"]:
+        words += " · " + got["warn"]
+    return dict(key=(ratio, want, helix), text=words, last=got["last"],
+                use={"module": "%g mm" % got["module"], "teeth": "%d" % got["teeth1"]})
+
+
 def _wormset_info(values):
     try:
         m, n, d = _number(values.get("module")), int(_number(values.get("starts"))), _number(values.get("diameter"))
@@ -1062,5 +1090,6 @@ def _set_namespace(kind, title, fields, info):
 
 
 SPUR_GEARS = _set_namespace("gear", "Spur Gears", PAIR_FIELDS, _pair_info)
+SPUR_GEARS.suggestion = _pair_suggestion
 WORM_GEAR = _set_namespace("worm", "Worm Gear", WORMSET_FIELDS, _wormset_info)
 KINDS = [SPUR_GEARS, WORM_GEAR]

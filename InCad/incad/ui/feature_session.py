@@ -1929,14 +1929,40 @@ class FeatureSession(QtCore.QObject):
             log.logger().exception("adjusted values")
 
     def _show_info(self):
-        """A kind may say what the values make (Gear: its teeth and diameters) under the fields."""
+        """A kind may say what the values make (Gear: its teeth and diameters) under the fields, and suggest values
+        with buttons under them (Spur Gears: the pair at a standard module for a wanted centre distance, Use and Smaller
+        module; the user, 2026-11-27)."""
         hook = getattr(self.kind, "info", None)
         if hook is None or self.dialog is None:
             return
         try:
-            self.dialog.set_info(hook(self.dialog.values()) or "")
+            values = self.dialog.values()
+            text = hook(values) or ""
+            sug = None
+            ask = getattr(self.kind, "suggestion", None)
+            if ask is not None and hasattr(self.dialog, "offer"):
+                first = ask(values, 0)
+                if first is not None and getattr(self, "_sug_key", None) != first["key"]:
+                    self._sug_key, self._sug_step = first["key"], 0
+                sug = first if first is None or not getattr(self, "_sug_step", 0) else ask(values, self._sug_step)
+            if sug is not None:
+                text = (text + "\n" if text else "") + sug["text"]
+                self.dialog.offer("Use", lambda use=sug["use"]: self._suggestion_use(use),
+                                  None if sug["last"] else "Smaller module", self._suggestion_smaller)
+            elif hasattr(self.dialog, "offer"):
+                self.dialog.offer(None)
+            self.dialog.set_info(text)
         except Exception:
             log.logger().exception("dialog info")
+
+    def _suggestion_use(self, use):
+        """Use: the suggested values set in the window, previewed as typed ones."""
+        self.dialog.set_values(use)
+        self._changed(self.dialog.values())
+
+    def _suggestion_smaller(self):
+        self._sug_step = getattr(self, "_sug_step", 0) + 1
+        self._show_info()
 
     def _show_summary(self):
         """A kind may describe what its pick fields now stand for (names, dependents) beyond the picks themselves."""

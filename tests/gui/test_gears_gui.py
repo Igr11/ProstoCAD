@@ -118,10 +118,32 @@ def test_4_editing_through_the_second_gear():
     assert lead.Shape.common(second.Shape).Volume < 0.05
 
 
+def test_5_ratio_with_a_wanted_distance():
+    """Ratio held, a Center distance wanted: the pair at module 2 said, Smaller module the next one down, Use sets the
+    module and gear 1's teeth, the Ratio stays (the user, 2026-11-27)."""
+    commands.REGISTRY.run("feature.gear")
+    harness.pump(1500)
+    d = dialog()
+    assert d.row_visible("want_distance") and not d.offer_btn.isVisible(), "empty: nothing offered"
+    type_in("ratio", "2")
+    type_in("want_distance", "61 mm")
+    assert "Module 2 · 20 : 40 teeth · center distance 60 mm" in d.info_text(), d.info_text()
+    assert d.offer_btn.isVisible() and d.offer_btn.text() == "Use" and d.offer2_btn.text() == "Smaller module"
+    d.offer2_btn.click()
+    harness.pump(800)
+    assert "Module 1.5 · 27 : 54" in d.info_text(), d.info_text()
+    d.offer_btn.click()
+    harness.pump(1500)
+    v = dialog().values()
+    assert v["module"].startswith("1.5") and v["teeth"] == "27" and v["ratio"] == "2", v
+    s().feature_session.cancel()
+    harness.pump(800)
+
+
 def test_9_cleanup():
     App.closeDocument(doc().Name)
     harness.pump(400)
 
 
 harness.run([test_0_setup, test_1_spur_gears_make_the_pair, test_2_one_gear_hides_gear_2, test_3_a_worm_gear,
-             test_4_editing_through_the_second_gear, test_9_cleanup])
+             test_4_editing_through_the_second_gear, test_5_ratio_with_a_wanted_distance, test_9_cleanup])

@@ -702,9 +702,19 @@ class FeatureWindow(QtWidgets.QFrame):
         self.rescue_button.setObjectName("FwButton")
         self.rescue_button.clicked.connect(lambda: self._rescue() if self._rescue is not None else None)
         self.rescue_button.hide()
+        self.offer_btn = QtWidgets.QPushButton()  # what the line above offers (Spur Gears: Use, Smaller module)
+        self.offer_btn.setObjectName("FwButton")
+        self.offer_btn.hide()
+        self.offer_btn.clicked.connect(lambda: self._offered() if getattr(self, "_offered", None) else None)
+        self.offer2_btn = QtWidgets.QPushButton()
+        self.offer2_btn.setObjectName("FwButton")
+        self.offer2_btn.hide()
+        self.offer2_btn.clicked.connect(lambda: self._offered2() if getattr(self, "_offered2", None) else None)
         rb = QtWidgets.QHBoxLayout()
         rb.setContentsMargins(9, 6, 9, 0)
         rb.addWidget(self.rescue_button)
+        rb.addWidget(self.offer_btn)
+        rb.addWidget(self.offer2_btn)
         rb.addStretch(1)
         col.addLayout(rb)
         col.addLayout(self._footer())
@@ -1272,6 +1282,14 @@ class FeatureWindow(QtWidgets.QFrame):
         self.warn.setStyleSheet("color: #ff6b5e; padding: 6px 10px 0 10px;")
         self.warn.setText(text or "")
         self.warn.setVisible(bool(text))
+
+    def offer(self, text, do=None, text2=None, do2=None):
+        """Buttons under the line above OK that act on what it says (Spur Gears: Use, Smaller module); None: gone."""
+        self._offered, self._offered2 = do, do2
+        self.offer_btn.setText(text or "")
+        self.offer_btn.setVisible(bool(text))
+        self.offer2_btn.setText(text2 or "")
+        self.offer2_btn.setVisible(bool(text and text2))
 
     def note(self, text):
         """A plain line above OK: what to do next, not what is wrong."""

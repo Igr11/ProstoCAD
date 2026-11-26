@@ -44,6 +44,47 @@ def root_diameter(module, teeth, helix=0.0):
     return pitch_diameter(module, teeth, helix) - 2 * DEDENDUM * module
 
 
+MODULES_1 = (0.05, 0.06, 0.08, 0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0,
+             5.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0, 25.0, 32.0, 40.0, 50.0)  # ISO 54 / GOST 9563, the first series
+SUGGEST_MODULES = tuple(m for m in reversed(MODULES_1) if m <= 2.0)  # from 2 down (the user, 2026-11-27)
+UNDERCUT_TEETH = 17  # below this a 20° gear cut by a rack has its tooth root undercut
+SUGGEST_MAX_TEETH = 400
+
+
+def suggest(ratio, want, helix=0.0, step=0):
+    """The pair that holds Ratio and comes nearest a wanted centre distance at one standard module (the user,
+    2026-11-27; the same as ProstoCAD Next's gear_solid.suggest for an outside pair): module 2 first, each `step` the
+    next one down the first series (ISO 54); whole teeth, the Ratio exact when whole teeth allow it (else the nearest),
+    then the distance nearest `want`; gear 2 has Ratio × gear 1's teeth, a = m (z1 + z2) / (2 cos β).
+    dict(module, teeth1, teeth2, ratio, distance, small, warn, last) or None."""
+    try:
+        ratio, want = float(ratio), float(want)
+    except (TypeError, ValueError):
+        return None
+    if ratio <= 0 or want <= 0 or not 0 <= step < len(SUGGEST_MODULES):
+        return None
+    m = SUGGEST_MODULES[step]
+    c = math.cos(math.radians(helix or 0.0))
+    best = None
+    for z1 in range(MIN_TEETH, SUGGEST_MAX_TEETH + 1):
+        z2 = int(round(z1 * ratio))
+        if z2 < MIN_TEETH or z2 > SUGGEST_MAX_TEETH:
+            continue
+        got = z2 / z1
+        a = m * (z1 + z2) / (2 * c)
+        key = (round(abs(got - ratio), 9), abs(a - want))
+        if best is None or key < best[0]:
+            best = (key, z1, z2, got, a)
+    if best is None:
+        return None
+    _key, z1, z2, got, a = best
+    small = min(z1, z2)
+    warn = ("fewer than %d teeth (%d): the root of the tooth is undercut" % (UNDERCUT_TEETH, small)
+            if small < UNDERCUT_TEETH else "")
+    return dict(module=m, teeth1=z1, teeth2=z2, ratio=got, distance=a, small=small, warn=warn,
+                last=step + 1 >= len(SUGGEST_MODULES))
+
+
 def teeth_for(diameter, module, helix=0.0):
     """The whole number of teeth closest to a pitch Ø (at least MIN_TEETH)."""
     return max(MIN_TEETH, int(round(diameter * math.cos(math.radians(helix)) / module)))
