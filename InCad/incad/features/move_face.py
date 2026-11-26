@@ -28,7 +28,7 @@ FIELDS = (
     # starts at 0: nothing moves until a value is typed or the arrow dragged (5 mm opened refused on small parts)
     Field("distance", "Distance", "value_length", default="0 mm", show_if=("extent", ("distance",))),
     Field("to", "To", "pick", pick="move_to", show_if=("extent", ("to",))),
-    Field("mode", "Neighbours", "choice", (("inventor", "Inventor"), ("step", "Step"), ("together", "Together")),
+    Field("mode", "Neighbours", "choice", (("inventor", "Smart"), ("step", "Step"), ("together", "Together")),
           "inventor"),
 )
 

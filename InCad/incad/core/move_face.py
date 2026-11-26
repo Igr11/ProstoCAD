@@ -11,8 +11,8 @@ import Part
 
 FACES_MSG = "The faces must be flat and face the same way"
 PARALLEL_MSG = "Pick a face, plane, edge or point parallel to the faces"
-ROUND_MSG = "A neighbouring face is round: Inventor mode can't follow it yet — try Step or Together"
-WALLS_MSG = "The walls around the chamfer / fillet must run along the move — try Inventor or Step"
+ROUND_MSG = "A neighbouring face is round: Smart can't follow it yet — try Step or Together"
+WALLS_MSG = "The walls around the chamfer / fillet must run along the move — try Smart or Step"
 TOO_LARGE_MSG = "The move is too large: a neighbouring face would vanish"
 GONE_MSG = "A face to move is no longer there"
 _TOL = 1e-6
