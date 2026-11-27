@@ -1,2 +1,2 @@
 """InCad: an Inventor/Alibre-style workbench for FreeCAD."""
-__version__ = "0.18.0"
+__version__ = "0.18.1"

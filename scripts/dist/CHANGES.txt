@@ -5,7 +5,7 @@ This build: VERSION
 Newest build first. The build name is the name of the zip file.
 
 
-Next version (not released)
+0.18.1
 ----
 - Shell on a part built on an imported one (a STEP): only what was built in ProstoCAD is hollowed, the import stays solid as it came; the wall stands on the import and grows into one with it, inside and outside. A Loft on an imported gear took 20 minutes and failed; now it takes seconds. The part is fully checked once, not twice, and Esc stops a Shell. Shells made in earlier versions are made as they were. In the Shell window a new wall is computed in the background: the window does not stand still, "Computing…" shows meanwhile, a new value stops the one computing, Esc stops it and leaves the window open, and OK waits for the wall.
 
