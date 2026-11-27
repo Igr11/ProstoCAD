@@ -5,6 +5,10 @@ This build: VERSION
 Newest build first. The build name is the name of the zip file.
 
 
+Next version (not released)
+----
+- Shell on a part built on an imported one (a STEP): only what was built in ProstoCAD is hollowed, the import stays solid as it came; the wall stands on the import and grows into one with it, inside and outside. A Loft on an imported gear took 20 minutes and failed; now it takes seconds. The part is fully checked once, not twice, and Esc stops a Shell. Shells made in earlier versions are made as they were. In the Shell window a new wall is computed in the background: the window does not stand still, "Computing…" shows meanwhile, a new value stops the one computing, Esc stops it and leaves the window open, and OK waits for the wall.
+
 0.18.0
 ----
 - The sketch is ProstoCAD's own now, quick on big sketches: magnets to ends, middles, centres, crossings and the part's edges, guides from points the pointer rests on, size boxes at the pointer (Tab holds a size), the space bar to switch what a tool does, a right-click ring, Tangent Arc, Rotate, copy and paste, Dim Construction Lines, a Polygon of any number of sides, Cancel Sketch. Files of earlier versions open in it as they are.

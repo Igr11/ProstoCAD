@@ -52,19 +52,27 @@ def _face(f):
 
 def healed(solid):
     """`solid` made sound (see the module), or `solid` itself."""
-    if len(solid.Faces) > MANY_FACES or not faulty(solid):
-        return solid
+    return checked(solid)[0]
+
+
+def checked(solid):
+    """(healed(solid), is it still faulty): the full check, 15 s on an imported gear, made once for both (Shell
+    checked the part again right after; the user: "why so many checks"). Not looked at (more than MANY_FACES): False."""
+    if len(solid.Faces) > MANY_FACES:
+        return solid, False
+    if not faulty(solid):
+        return solid, False
     try:
         faces = [_face(f) for f in solid.Faces if f.Area > 1e-6]
         sewn = Part.Compound(faces)
         sewn.sewShape(TOL)
         if len(sewn.Shells) != 1 or not sewn.Shells[0].isClosed():
-            return solid
+            return solid, True
         out = Part.Solid(sewn.Shells[0])
         if out.Volume < 0:
             out.reverse()
     except Exception:
-        return solid
+        return solid, True
     if not out.isValid() or faulty(out) or abs(out.Volume - solid.Volume) > 1e-4 * abs(solid.Volume):
-        return solid
-    return out
+        return solid, True
+    return out, False

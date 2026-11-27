@@ -224,6 +224,7 @@ def window_class():
         accepted = Signal()
         applied = Signal()
         cancelled = Signal()
+        escaped = Signal()  # Esc in the window: the session stops a background computation first, else cancels
         pickRequested = Signal(str)
         activePickChanged = Signal(str)
         picksEdited = Signal(str)
@@ -645,7 +646,7 @@ def window_class():
         def keyPressEvent(self, e):
             if e.key() == Qt.Key_Escape:
                 self._type_timer.stop()
-                self.cancelled.emit()
+                self.escaped.emit()
                 return
             QtWidgets.QFrame.keyPressEvent(self, e)
 

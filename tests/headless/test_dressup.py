@@ -282,6 +282,177 @@ class ShellOnOccTest(unittest.TestCase):
         self.assertAlmostEqual(b.ZMin, -1, places=3)
 
 
+class ShellOnImportedTest(unittest.TestCase):
+    """A part built on an imported one (the user's Loft on an imported gear: its Shell hollowed all 270 faces of the
+    gear and took 20 minutes): only the built part is hollowed, the import stays solid, the wall stands on it and
+    grows into one with it; the full check made once; Esc stops it. A Shell saved before (no mark) is made as it
+    was."""
+
+    def setUp(self):
+        import Part
+        from incad.core import document, import_step
+        self.doc = util.new_doc("ShI")
+        self.body = document.make_part(self.doc)
+        self.src = self.doc.addObject("Part::Feature", "Imported")
+        self.src.Shape = Part.makeBox(40, 30, 20)
+        self.src.addProperty("App::PropertyString", import_step.MARK)
+        setattr(self.src, import_step.MARK, "/somewhere/gear.step")
+        self.body.BaseFeature = self.src
+        self.box = self.body.newObject("PartDesign::AdditiveBox", "Box")  # built on top: 20 x 10 x 15
+        self.box.Length, self.box.Width, self.box.Height = 20, 10, 15
+        self.box.Placement = App.Placement(App.Vector(10, 10, 20), App.Rotation())
+        self.doc.recompute()
+        self.assertAlmostEqual(self.box.Shape.Volume, 24000 + 3000, places=3)
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def face(self, z):
+        return "%s:Face%d" % (self.box.Name, [i + 1 for i, f in enumerate(self.box.Shape.Faces)
+                                              if f.Surface.TypeId == "Part::GeomPlane"
+                                              and abs(f.CenterOfMass.z - z) < 1e-6][0])
+
+    def shell(self, faces, direction="inside"):
+        k = dressup.SHELL
+        f = k.create(self.doc, self.body, None, dict(k.defaults(self.doc, self.body, None), faces=faces,
+                                                     thickness="1 mm", direction=direction, closed=not faces))
+        self.doc.recompute()
+        return f
+
+    def test_inside_the_built_part_only(self):
+        import time
+        t = time.time()
+        f = self.shell(self.face(35))
+        self.assertNotIn("Invalid", f.State, f.getStatusString())
+        self.assertLess(time.time() - t, 30)
+        s = f.Shape
+        self.assertEqual(len(s.Solids), 1)
+        # the import whole (24000) + the box's walls, open at the top, its floor 1 mm on the import: 3000 - 18 x 8 x 14
+        self.assertAlmostEqual(s.Volume, 24000 + 3000 - 18 * 8 * 14, places=2)
+        self.assertTrue(getattr(f, dressup.BUILT_MARK))
+        self.assertTrue(getattr(f, dressup.SHELL_MARK).startswith("built part"))
+
+    def test_outside_stops_at_the_import(self):
+        f = self.shell(self.face(35), direction="outside")
+        self.assertNotIn("Invalid", f.State, f.getStatusString())
+        s = f.Shape
+        self.assertEqual(len(s.Solids), 1)
+        # the import whole + a 1 mm wall round the box (22 x 12 - 20 x 10) x 15, none of it inside the import
+        self.assertAlmostEqual(s.Volume, 24000 + (22 * 12 - 20 * 10) * 15, places=2)
+        self.assertAlmostEqual(s.optimalBoundingBox().ZMin, 0, places=3)
+
+    def test_a_new_wall_does_not_take_the_import_away_again(self):
+        from incad.core import shell_solid
+        calls, real = [], shell_solid._built_pieces
+        shell_solid._built_pieces = lambda *a: calls.append(1) or real(*a)
+        try:
+            f = self.shell(self.face(35))
+            k = dressup.SHELL
+            k.update(self.doc, f, dict(k.read(self.doc, f), thickness="2 mm"))
+            self.doc.recompute()
+        finally:
+            shell_solid._built_pieces = real
+        self.assertNotIn("Invalid", f.State, f.getStatusString())
+        self.assertEqual(len(calls), 1)
+        self.assertAlmostEqual(f.Shape.Volume, 24000 + 3000 - 16 * 6 * 13, places=2)
+
+    def _job(self, t, faces=None):
+        """make_built() as the Shell window runs it: Pending while the job runs, then the answer."""
+        import time
+        from incad.core import shell_solid
+        top = faces if faces is not None else \
+            [g for g in self.box.Shape.Faces if abs(g.CenterOfMass.z - 35) < 1e-6]
+        shell_solid.BACKGROUND["on"] = True
+        try:
+            with self.assertRaises(shell_solid.Pending):
+                shell_solid.make_built(self.box.Shape, self.src.Shape, top, t, True)
+            end = time.time() + 120
+            while not shell_solid.poll():
+                self.assertLess(time.time(), end, "the job never ended")
+                time.sleep(0.05)
+            return shell_solid.make_built(self.box.Shape, self.src.Shape, top, t, True)
+        finally:
+            shell_solid.BACKGROUND["on"] = False
+            shell_solid.stop()
+
+    def test_the_background_job_makes_the_same_wall(self):
+        from incad.core import shell_solid
+        shape, how = self._job(1.0)
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume, 24000 + 3000 - 18 * 8 * 14, places=2)
+        top = [g for g in self.box.Shape.Faces if abs(g.CenterOfMass.z - 35) < 1e-6]
+        here, _ = shell_solid.make_built(self.box.Shape, self.src.Shape, top, 1.0, True)
+        self.assertAlmostEqual(shape.Volume, here.Volume, places=4)
+        self.assertTrue(how.startswith("built part"))
+
+    def test_a_new_value_stops_the_job_running(self):
+        from incad.core import shell_solid
+        top = [g for g in self.box.Shape.Faces if abs(g.CenterOfMass.z - 35) < 1e-6]
+        shell_solid.BACKGROUND["on"] = True
+        try:
+            with self.assertRaises(shell_solid.Pending):
+                shell_solid.make_built(self.box.Shape, self.src.Shape, top, 1.0, True)
+            first = shell_solid._JOB["job"]
+            with self.assertRaises(shell_solid.Pending):
+                shell_solid.make_built(self.box.Shape, self.src.Shape, top, 2.0, True)
+            self.assertIsNotNone(first.proc.poll(), "the job for 1 mm was stopped")
+            self.assertIsNot(shell_solid._JOB["job"], first)
+            self.assertEqual(shell_solid._JOB["job"].key[-2], 2.0)
+            shell_solid.stop()
+            self.assertFalse(shell_solid.running())
+        finally:
+            shell_solid.BACKGROUND["on"] = False
+            shell_solid.stop()
+
+    def test_an_error_comes_back_in_words(self):
+        with self.assertRaises(ValueError) as e:
+            self._job(50.0)  # (a wall far thicker than the box)
+        self.assertIn("couldn't hollow", str(e.exception))
+
+    def test_a_face_of_the_import_is_refused(self):
+        from incad.core import shell_solid
+        bottom = [g for g in self.box.Shape.Faces if abs(g.CenterOfMass.z) < 1e-6]
+        with self.assertRaises(ValueError) as e:
+            shell_solid.make_built(self.box.Shape, self.src.Shape, bottom, 1.0, True)
+        self.assertIn("Pick a face of the part built in ProstoCAD", str(e.exception))
+
+    def test_the_full_check_once(self):
+        from incad.core import heal, shell_solid
+        calls, real = [], heal.faulty
+        heal.faulty = lambda s: calls.append(1) or real(s)
+        try:
+            top = [g for g in self.box.Shape.Faces if abs(g.CenterOfMass.z - 35) < 1e-6]
+            shell_solid.make_built(self.box.Shape, self.src.Shape, top, 1.0, True)
+        finally:
+            heal.faulty = real
+        self.assertEqual(len(calls), 1)
+
+    def test_esc_stops_it(self):
+        from incad.core import safe, shell_solid
+        real = safe.stop_if_esc
+
+        def esc(what="the computation"):
+            raise safe.Stopped("Stopped %s (Esc)" % what)
+        safe.stop_if_esc = esc
+        try:
+            top = [g for g in self.box.Shape.Faces if abs(g.CenterOfMass.z - 35) < 1e-6]
+            with self.assertRaises(safe.Stopped):
+                shell_solid.make_built(self.box.Shape, self.src.Shape, top, 1.0, True)
+            with self.assertRaises(safe.Stopped):
+                shell_solid.make(self.box.Shape, top, 1.0, True)
+        finally:
+            safe.stop_if_esc = real
+
+    def test_a_shell_saved_before_is_made_as_it_was(self):
+        f = self.shell(self.face(35))
+        new = f.Shape.Volume
+        setattr(f, dressup.BUILT_MARK, False)  # (a Shell saved before has no mark: getattr gives False the same)
+        f.touch()
+        self.doc.recompute()
+        self.assertNotIn("Invalid", f.State, f.getStatusString())
+        self.assertLess(f.Shape.Volume, new - 1000, "the whole part hollowed, the import too")
+
+
 class ShellBeforeThreadShaftTest(unittest.TestCase):
     """A plain shaft with a thread: the Shell goes before the thread and the thread still cuts the tube."""
 

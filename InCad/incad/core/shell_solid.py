@@ -21,6 +21,18 @@ TOL = 1e-3  # mm: the offset's tolerance (as the Boolean's fuzzy one)
 MANY_FACES = 3000  # a part with more (an STL's triangles): no closed hollow, it would offset every face
 
 
+def _stop():
+    """Esc stops the Shell between its steps (the user: Esc must cancel it; the wall of an imported gear took 20
+    minutes). safe.Stopped goes through every `except Exception` here (_stopped)."""
+    from incad.core import safe
+    safe.stop_if_esc("the Shell")
+
+
+def _stopped(exc):
+    from incad.core import safe
+    return isinstance(exc, safe.Stopped)
+
+
 def _sound(shape, base, inside, faulty_base=False):
     """faulty_base: the part was faulty already (a STEP's): a wall no worse than it is kept, its full check left out."""
     if shape is None or shape.isNull() or len(shape.Solids) != 1 or not shape.isValid():
@@ -62,6 +74,7 @@ def _in_child(solid, kind, d, inter, join, faces=()):
     import os
     import subprocess
     import tempfile
+    import time
     from incad import host
     exe = host.freecadcmd(App.getHomePath())
     if exe is None:
@@ -80,10 +93,27 @@ def _in_child(solid, kind, d, inter, join, faces=()):
         env = dict(os.environ, INCAD_OCC_TRIAL="|".join(
             [src, out, kind, repr(d), "1" if inter else "0", str(join), ",".join(idx)]))
         try:
-            subprocess.run([exe, "-u", os.path.join(tmp, "user.cfg"), script], env=env, timeout=CHILD_SECONDS,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           creationflags=host.quiet_process_flags())
+            proc = subprocess.Popen([exe, "-u", os.path.join(tmp, "user.cfg"), script], env=env,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    creationflags=host.quiet_process_flags())
         except Exception:
+            return None
+        end = time.monotonic() + CHILD_SECONDS
+        try:
+            while True:  # waited for in short steps: Esc closes the process (wait returns as soon as it ends)
+                try:
+                    proc.wait(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if time.monotonic() > end:
+                    raise subprocess.TimeoutExpired(exe, CHILD_SECONDS)
+                _stop()
+        except BaseException as e:
+            proc.kill()
+            proc.wait()
+            if _stopped(e) or not isinstance(e, Exception):
+                raise
             return None
         if not os.path.exists(out):
             return None
@@ -97,10 +127,13 @@ def _offset_solid(shape, d, faulty=False):
     """The part offset by d (a solid), the first way OCC gives a valid one in: a block with fillets no larger than the
     wall offset inward with arc joins came back invalid, with intersection joins sound (its inner corners sharp)."""
     for inter, join in ((False, 2), (True, 2), (False, 0), (True, 0)):  # sharp first: arc joins round corners
+        _stop()
         try:
             off = _in_child(shape, "offset", d, inter, join) if join == 2 or faulty else \
                 shape.makeOffsetShape(d, TOL, inter, False, 0, join, False)
-        except Exception:
+        except Exception as e:
+            if _stopped(e):
+                raise
             continue
         if off is None or off.isNull():
             continue
@@ -263,11 +296,18 @@ def by_slabs(base, faces, t, faulty=False):
     hair into the block's top); faces one at a time it does in a second. None when it can't be made."""
     try:
         keep = [f for f in base.Faces if not any(f.isSame(g) for g in faces)]
-        slabs = [_slab(f, t, faulty) for f in keep if f.Area > 1e-9]
+        slabs = []
+        for f in keep:
+            if f.Area > 1e-9:
+                _stop()
+                slabs.append(_slab(f, t, faulty))
         if not slabs or not all(x.isValid() for x in slabs):
             return None
+        _stop()
         slabs += _corner_blocks(base, keep, t)
+        _stop()
         fused = slabs[0].multiFuse(slabs[1:])
+        _stop()
         wall = base.common(fused)  # (the part first: the other way round gave nothing on the user's faulty air)
         if not wall.Solids:
             wall = fused.common(base)
@@ -276,7 +316,9 @@ def by_slabs(base, faces, t, faulty=False):
         except Exception:  # (on the user's faulty air: "Bnd_Box is void"; the Boolean's result is kept as it is)
             pass
         return _without_crumbs(wall)
-    except Exception:
+    except Exception as e:
+        if _stopped(e):
+            raise
         return None
 
 
@@ -313,6 +355,7 @@ def by_offset(base, faces, t, inside=True, faulty=False):
                             cutters.append(corner)
             result = base
             for c in cutters:  # one at a time (no fuse of the cutters)
+                _stop()
                 result = result.cut(c)
             return _without_crumbs(result.removeSplitter())
         outer = _offset_solid(base, t, faulty)
@@ -325,7 +368,9 @@ def by_offset(base, faces, t, inside=True, faulty=False):
                 return None
             wall = wall.cut(g.translated(n * 0.01).extrude(n * -(t + 0.01)))
         return wall.removeSplitter()
-    except Exception:
+    except Exception as e:
+        if _stopped(e):
+            raise
         return None
 
 
@@ -343,16 +388,15 @@ def make(base, faces, t, inside=True):
     solid = base.Solids[0]
     if len(solid.Faces) <= MANY_FACES:  # a STEP's faulty arcs made exact first (the user's air2: Shell refused)
         from incad.core import heal
-        sound = heal.healed(solid)
+        sound, faulty = heal.checked(solid)  # the full check once (the user: 15 s each on an imported gear, twice)
         if sound is not solid:
             faces = [_same_face(f, sound) for f in faces]
             solid = sound
-    faulty = False
-    if len(solid.Faces) <= MANY_FACES:  # OCC's offset crashed the whole program on a faulty shape (an imported STEP
-        try:                            # whose round face crossed itself): there every offset runs in a process of
-            solid.check(True)           # its own, where a crash is only a failed try (the user: "it has to work")
-        except Exception:
-            faulty = True
+        # faulty: OCC's offset crashed the whole program on a faulty shape (an imported STEP whose round face crossed
+        # itself): there every offset runs in a process of its own, where a crash is only a failed try (the user:
+        # "it has to work")
+    else:
+        faulty = False
     if not faces and len(solid.Faces) > MANY_FACES:  # the closed hollow offsets the whole part: minutes on an STL's
         raise ValueError("Pick the faces to open (a closed hollow of a part with %d faces would take minutes)"
                          % len(solid.Faces))
@@ -361,6 +405,7 @@ def make(base, faces, t, inside=True):
         # arc joins round corners the part never had (the user: "everything has to be sharp")
         for join, inter, how in (("slabs", None, "walls face by face"), (2, False, "intersection joins"),
                                  (0, False, "arc joins"), (0, True, "intersection")):
+            _stop()
             if join == "slabs":  # before OCC's intersection joins, which crashed on the user's air2
                 r = by_slabs(solid, faces, t, faulty) if inside else None
             elif not faces:
@@ -369,10 +414,13 @@ def make(base, faces, t, inside=True):
                 try:
                     r = _in_child(solid, "thick", -t if inside else t, inter, join, faces) if join == 2 or faulty \
                         else solid.makeThickness(faces, -t if inside else t, TOL, inter, False, 0, join)
-                except Exception:
+                except Exception as e:
+                    if _stopped(e):
+                        raise
                     continue
             if _sound(r, solid, inside, faulty):
                 return r, how
+    _stop()
     r = by_offset(solid, faces, t, inside, faulty)
     if _sound(r, solid, inside, faulty):
         return r, "offset walls"
@@ -381,3 +429,275 @@ def make(base, faces, t, inside=True):
                          "through it, opened top and bottom, leaves the hole's tube apart)" % len(r.Solids))
     raise ValueError("couldn't hollow this shape with %g mm walls: try a thinner wall, open other faces, or make "
                      "the Shell earlier in the tree, before fillets and chamfers" % t)
+
+
+ON = 1e-4  # mm: a point this near a face lies on it (a picked face's part on the built part)
+
+
+def _inner_point(face):
+    """A point inside the face (its centre of mass may lie off it: a ring, an arc): the middle of its largest
+    triangle."""
+    pts, tris = face.tessellate(max(0.05, 0.01 * face.BoundBox.DiagonalLength))
+    if not tris:
+        return face.CenterOfMass
+    def area(tri):
+        a, b, c = (pts[i] for i in tri)
+        return (b - a).cross(c - a).Length
+    a, b, c = (pts[i] for i in max(tris, key=area))
+    return (a + b + c) * (1.0 / 3)
+
+
+def _lies_on(point, shape):
+    try:
+        return shape.distToShape(Part.Vertex(point))[0] < ON
+    except Exception:
+        return False
+
+
+def make_built(base, imported, faces, t, inside=True, near=None):
+    """(shell, how) as make(), on a part built in ProstoCAD on an imported one (the body's base: a STEP): only the
+    part built outside the import is hollowed, the import stays solid as it came (the user: the Shell of a Loft on
+    an imported gear offset all 270 faces of the gear and took 20 minutes; the Loft alone takes a second). Where the
+    built part lies on the import it keeps its wall: the wall stands on the import and grows into one with it (the
+    user's Loft touched the gear along a ring 0.4 mm wide; with no wall there the wall met the gear along a line and
+    stayed apart). Outside, the wall goes round the built part and stops at the import. near: a box holding all
+    the features made on the import (outside it the part is the import as it came): the import is taken away
+    inside it only (the gear: 0.9 s, not 28 s). With nothing built outside the import, or the import not
+    taken away cleanly, make() on the whole part (as before)."""
+    if base is None or base.isNull() or not base.Solids or imported is None or imported.isNull() \
+            or not imported.Solids or t <= 0 or len(base.Solids) > 1:
+        return make(base, faces, t, inside)
+    solid, imp = base.Solids[0], imported
+    _stop()
+    if BACKGROUND["on"]:
+        return _in_background(solid, imp, near, faces, t, inside)
+    key = _built_key(solid, imp, near)
+    pieces = _BUILT["pieces"] if _BUILT["key"] == key else None
+    if pieces is None:
+        pieces = _built_pieces(solid, imp, near)
+        _BUILT.update(key=key, pieces=pieces, shapes=(solid, imp))  # (held: their keys can't come back on others)
+    if not pieces:
+        return make(base, faces, t, inside)
+    return _shell_pieces(pieces, imp, faces, t, inside)
+
+
+_BUILT = {"key": None, "pieces": None, "shapes": None}  # the last part's built pieces: a new wall thickness doesn't take the import
+# away again (the user: "a bit slow when the wall thickness changes"; 1.1 s of 3.9 on the gear)
+
+
+def _box_key(near):
+    return None if near is None else (near.XMin, near.YMin, near.ZMin, near.XMax, near.YMax, near.ZMax)
+
+
+def _built_key(solid, imp, near):
+    return solid.hashCode(), imp.hashCode(), _box_key(near)
+
+
+def _built_pieces(solid, imp, near):
+    """The solids of `solid` outside `imp` (see make_built), [] when there are none or the cut failed."""
+    try:
+        built = None
+        if near is not None:
+            box = Part.makeBox(near.XLength, near.YLength, near.ZLength,
+                               App.Vector(near.XMin, near.YMin, near.ZMin))
+            part_in, imp_in = solid.common(box), imp.common(box)
+            # outside the box the part must be the import as it came: the volumes say so (within 1e-4: 0.03 mm3 off
+            # on the user's gear, a STEP), else the whole cut
+            if abs((solid.Volume - imp.Volume) - (part_in.Volume - imp_in.Volume)) <= 1e-4 * solid.Volume:
+                built = part_in.cut(imp_in)
+        if built is None:
+            built = solid.cut(imp)
+        return [s for s in built.Solids if s.Volume > 1e-6 * solid.Volume]
+    except Exception:
+        return []
+
+
+def _shell_pieces(pieces, imp, faces, t, inside):
+    """make_built() once the built pieces are there: each hollowed, the picked faces open, joined to the import."""
+    # the picked faces on the pieces (a face the cut split: each of its parts)
+    picked = []
+    for f in faces:
+        on = [g for p in pieces for g in p.Faces if g.Surface.TypeId == f.Surface.TypeId
+              and f.BoundBox.intersect(g.BoundBox) and _lies_on(_inner_point(g), f)]
+        if not on:
+            raise ValueError("Pick a face of the part built in ProstoCAD: the imported shape stays solid")
+        picked += on
+    walls, hows = [], []
+    for p in pieces:
+        _stop()
+        opened = [g for g in p.Faces if any(g.isSame(x) for x in picked)]
+        r, how = make(p, opened, t, inside)
+        walls.append(r if inside else r.cut(imp))
+        hows.append(how)
+    _stop()
+    whole = imp.multiFuse(walls)  # (no Refine of the whole: 0.6 s of 2.2 on the user's gear; each wall is refined)
+    return whole, "built part: " + ", ".join(sorted(set(hows)))
+
+
+
+# ----- the Shell window's preview in a process of its own (the user: the window must not stand still while a new
+# wall is computed, 2.5 s on an imported gear; FreeCAD's geometry holds Python, so no thread can do it) -----
+BACKGROUND = {"on": False}  # set by the Shell window around its preview's recompute
+
+
+class Pending(Exception):
+    """The wall asked for is being computed in the background: the feature keeps what it shows."""
+
+
+_JOB = {"job": None}
+_READY = {"key": None, "value": None}  # the last job's answer: (shape, how), or the error's words
+
+_JOB_CHILD = r"""
+import json, os, sys
+a = os.environ["INCAD_SHELL_JOB"]
+sys.path.insert(0, os.environ["INCAD_SHELL_PATH"])
+import FreeCAD as App
+import Part
+def put(name, text):
+    with open(os.path.join(a, name + ".tmp"), "w") as fh:
+        fh.write(text)
+    os.rename(os.path.join(a, name + ".tmp"), os.path.join(a, name))
+try:
+    from incad.core import shell_solid as ss
+    with open(os.path.join(a, "spec.json")) as fh:
+        spec = json.load(fh)
+    solid = Part.read(os.path.join(a, "solid.brep")).Solids[0]
+    imp = Part.read(os.path.join(a, "imp.brep"))
+    faces = [solid.Faces[i] for i in spec["faces"]]
+    if os.path.exists(os.path.join(a, "pieces.brep")):
+        pieces = list(Part.read(os.path.join(a, "pieces.brep")).Solids)
+    else:
+        near = App.BoundBox(*spec["near"]) if spec["near"] else None
+        pieces = ss._built_pieces(solid, imp, near)
+        if pieces:
+            Part.makeCompound(pieces).exportBrep(os.path.join(a, "pieces_out.brep"))
+    if pieces:
+        shape, how = ss._shell_pieces(pieces, imp, faces, spec["t"], spec["inside"])
+    else:
+        shape, how = ss.make(solid, faces, spec["t"], spec["inside"])
+    shape.exportBrep(os.path.join(a, "out.brep"))
+    put("how.txt", how)
+except BaseException as e:
+    put("error.txt", str(e) if isinstance(e, ValueError) else "Shell: %s" % e)
+"""
+
+
+class _Job:
+    """One wall computed by a freecadcmd of its own; its files in a folder of its own."""
+
+    def __init__(self, key, solid, imp, near, idx, t, inside):
+        import json
+        import os
+        import subprocess
+        import tempfile
+        from incad import host
+        self.key, self.shapes, self.near = key, (solid, imp), near
+        self.dir = tempfile.mkdtemp(prefix="incad-shell-")
+        solid.exportBrep(os.path.join(self.dir, "solid.brep"))
+        imp.exportBrep(os.path.join(self.dir, "imp.brep"))
+        if _BUILT["key"] == _built_key(solid, imp, near) and _BUILT["pieces"]:
+            Part.makeCompound(_BUILT["pieces"]).exportBrep(os.path.join(self.dir, "pieces.brep"))
+        with open(os.path.join(self.dir, "spec.json"), "w") as fh:
+            json.dump({"faces": list(idx), "t": t, "inside": inside, "near": list(_box_key(near) or ()) or None}, fh)
+        with open(os.path.join(self.dir, "job.py"), "w") as fh:
+            fh.write(_JOB_CHILD)
+        exe = host.freecadcmd(App.getHomePath())
+        if exe is None:
+            raise RuntimeError("no freecadcmd")
+        here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # (the folder of incad)
+        env = dict(os.environ, INCAD_SHELL_JOB=self.dir, INCAD_SHELL_PATH=here)
+        self.proc = subprocess.Popen([exe, "-u", os.path.join(self.dir, "user.cfg"),
+                                      os.path.join(self.dir, "job.py")], env=env, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, creationflags=host.quiet_process_flags())
+
+    def done(self):
+        return self.proc.poll() is not None
+
+    def answer(self):
+        """(shape, how) or the error's words; the built pieces kept for the next job."""
+        import os
+        f = lambda n: os.path.join(self.dir, n)
+        if os.path.exists(f("pieces_out.brep")):
+            try:
+                _BUILT.update(key=_built_key(*self.shapes, self.near),
+                              pieces=list(Part.read(f("pieces_out.brep")).Solids), shapes=self.shapes)
+            except Exception:
+                pass
+        try:
+            if os.path.exists(f("how.txt")):
+                with open(f("how.txt")) as fh:
+                    return Part.read(f("out.brep")), fh.read()
+            if os.path.exists(f("error.txt")):
+                with open(f("error.txt")) as fh:
+                    return fh.read() or "Shell: the wall could not be made"
+        except Exception as e:
+            return "Shell: %s" % e
+        return "Shell: the computation stopped without an answer"
+
+    def kill(self):
+        try:
+            if self.proc.poll() is None:
+                self.proc.kill()
+                self.proc.wait()
+        except Exception:
+            pass
+        self.clean()
+
+    def clean(self):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def _in_background(solid, imp, near, faces, t, inside):
+    """make_built() for the Shell window: the answer when this wall was computed already, else Pending (a job for it
+    is started; one for other values is stopped: the last value typed wins)."""
+    idx = []
+    for f in faces:
+        i = next((k for k, g in enumerate(solid.Faces) if g.isSame(f)), None)
+        if i is None:  # (not a face of the part: computed here, as without the window)
+            BACKGROUND["on"] = False
+            try:
+                return make_built(solid, imp, faces, t, inside, near)
+            finally:
+                BACKGROUND["on"] = True
+        idx.append(i)
+    key = _built_key(solid, imp, near) + (tuple(idx), float(t), bool(inside))
+    if _READY["key"] == key:
+        value = _READY["value"]
+        if isinstance(value, str):
+            raise ValueError(value)
+        return value
+    job = _JOB["job"]
+    if job is not None and job.key == key:
+        raise Pending()
+    stop()
+    _JOB["job"] = _Job(key, solid, imp, near, idx, t, inside)
+    raise Pending()
+
+
+def running():
+    """A wall is being computed in the background."""
+    return _JOB["job"] is not None
+
+
+def poll():
+    """True once the background job ended (its answer kept for the next recompute), False while it runs, None with
+    no job."""
+    job = _JOB["job"]
+    if job is None:
+        return None
+    if not job.done():
+        return False
+    _JOB["job"] = None
+    try:
+        _READY.update(key=job.key, value=job.answer())
+    finally:
+        job.clean()
+    return True
+
+
+def stop():
+    """The background job, if any, killed (Esc, a new value, Cancel)."""
+    job, _JOB["job"] = _JOB["job"], None
+    if job is not None:
+        job.kill()

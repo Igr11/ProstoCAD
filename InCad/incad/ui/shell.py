@@ -1893,7 +1893,7 @@ class Shell(QtCore.QObject):
             self.stop_section(keep_cut=True)  # Esc = Done: the cut stays, the panel goes
             return
         if self.feature_session is not None:
-            self.feature_session.cancel()
+            getattr(self.feature_session, "escape", self.feature_session.cancel)()
             return
         import FreeCADGui as Gui
         from incad.sketch_next import session as new_sketch

@@ -174,6 +174,7 @@ def _shell_apply(doc, f, values):
 
 
 SHELL_MARK = "InCadShell"  # on InCad's own Shell (a PartDesign::FeaturePython): how its last wall was made
+BUILT_MARK = "InCadShellBuilt"  # on a Shell made after 0.18.0: on an imported part, only the built part hollowed
 
 
 class ShellFeature:
@@ -184,10 +185,13 @@ class ShellFeature:
         for name, kind, doc in (("Base", "App::PropertyLinkSub", "The faces removed (none: a closed hollow)"),
                                 ("Value", "App::PropertyLength", "The wall thickness"),
                                 ("Reversed", "App::PropertyBool", "Inside: the outer size stays"),
-                                (SHELL_MARK, "App::PropertyString", "How the wall was made")):
+                                (SHELL_MARK, "App::PropertyString", "How the wall was made"),
+                                (BUILT_MARK, "App::PropertyBool", "On an imported part: the built part only")):
             if name not in obj.PropertiesList:
                 obj.addProperty(kind, name, "Shell", doc)
         obj.setPropertyStatus(SHELL_MARK, "Hidden")
+        obj.setPropertyStatus(BUILT_MARK, "Hidden")
+        setattr(obj, BUILT_MARK, True)  # (a new Shell; one saved before has no mark and is made as it was)
         obj.Proxy = self
 
     def execute(self, obj):
@@ -204,8 +208,17 @@ class ShellFeature:
                     faces.append(src.getElement(sub))
                 except Exception:
                     raise ValueError("A removed face (%s) is no longer on the part: pick the faces again" % sub)
+        imported = _imported_base(obj) if getattr(obj, BUILT_MARK, False) else None
         try:
-            shape, how = shell_solid.make(base.Shape, faces, obj.Value.Value, bool(obj.Reversed))
+            if imported is not None:
+                shape, how = shell_solid.make_built(base.Shape, imported.Shape, faces, obj.Value.Value,
+                                                    bool(obj.Reversed), _built_region(obj, imported))
+            else:
+                shape, how = shell_solid.make(base.Shape, faces, obj.Value.Value, bool(obj.Reversed))
+        except shell_solid.Pending:  # the Shell window computes it in the background: what shows stays meanwhile
+            if obj.Shape.isNull():   # (the part as it was, the first time)
+                obj.Shape = base.Shape
+            return
         except ValueError:
             if _has_thread(base):
                 raise ValueError("ProstoCAD can't hollow a part with a modeled thread in it: make the Shell before the "
@@ -220,6 +233,47 @@ class ShellFeature:
 
     def loads(self, state):
         return None
+
+
+def _imported_base(feature):
+    """The first feature of the body when it stands on an imported part (a STEP: the body's base carries the
+    import mark), else None: its shape is the import in the features' own placement."""
+    from incad.core import import_step
+    f = feature
+    seen = set()
+    while f is not None and f.Name not in seen:
+        seen.add(f.Name)
+        below = getattr(f, "BaseFeature", None)
+        if below is None:
+            return None
+        if import_step.is_imported(below):
+            return f if f is not feature else None
+        f = below
+    return None
+
+
+def _built_region(feature, first):
+    """The box round every feature between the import (`first`, the body's first feature) and `feature`, each
+    changing the part inside its own tool shape only (AddSubShape: Extrude, Loft, Revolve, Pocket...); None when one
+    has no such shape (a fillet, a chamfer: they change the part anywhere)."""
+    box = None
+    f = getattr(feature, "BaseFeature", None)
+    while f is not None and f is not first:
+        tool = getattr(f, "AddSubShape", None)
+        if tool is None or tool.isNull() or not tool.Solids:
+            return None
+        placed = tool.copy()  # (a Box's tool shape is kept without the Box's own placement: both boxes taken)
+        placed.Placement = f.Placement.multiply(tool.Placement)
+        for b in (tool.BoundBox, placed.BoundBox):
+            if box is None:
+                box = b
+            else:
+                box.add(b)
+        f = getattr(f, "BaseFeature", None)
+    if f is None or box is None:
+        return None
+    box.enlarge(1.0)
+    return box
 
 
 def _has_thread(feature):
@@ -394,6 +448,7 @@ SHELL = SimpleNamespace(
     claims=lambda f: not getattr(f, "InCadHelperOf", None) and (  # a Sweep's wall is edited from its Sweep
         f.TypeId == "PartDesign::Thickness" or SHELL_MARK in f.PropertiesList),
     NEEDS_PROFILE=False, PROPS={"thickness": "Value"}, PRESELECT={"faces": "face"}, SOLID_PICKS=True,
+    BACKGROUND=True,  # the window's preview in a process of its own (incad.core.shell_solid.BACKGROUND)
     PREVIEW_WHILE_PICKING=True,  # the hollow part shows while faces are picked; a click on it means the part's face
     FIELDS=(Field("closed", "No opening", "bool", default=False),  # a closed hollow (Inventor; Thickness can't)
             Field("faces", "Remove faces", "picks", pick="face", show_if=("closed", (False,))),

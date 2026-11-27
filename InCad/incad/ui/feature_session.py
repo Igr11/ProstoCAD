@@ -335,6 +335,11 @@ class FeatureSession(QtCore.QObject):
         self._previewing = False
         self._risky = False  # the last preview was refused as risky (a Sweep bent too tight): OK asks, saves, builds
         self._after_preview = None
+        self._after_job = None  # OK / Apply + pressed while the Shell computed in the background: taken when done
+        self._applying = False
+        self._job_timer = QtCore.QTimer(self)  # the background Shell's job looked at (incad.core.shell_solid)
+        self._job_timer.setInterval(50)
+        self._job_timer.timeout.connect(self._poll_job)
         self._pending = None
         self._applied = None
         self._closed = False
@@ -432,6 +437,8 @@ class FeatureSession(QtCore.QObject):
         if getattr(self.kind, "ASSEMBLY", False):  # no Apply + in the assembly's windows (the user): the next window
             self.dialog.apply_button.hide()  # opened at once, the part's gizmo was gone and could not move it first
         self.dialog.cancelled.connect(self.cancel)
+        if hasattr(self.dialog, "escaped"):
+            self.dialog.escaped.connect(self.escape)
         self.dialog.activePickChanged.connect(lambda _key: self._sync_pick_view(seed=True))
         self.dialog.picksEdited.connect(self._picks_edited)
         self._refresh_options()
@@ -1626,6 +1633,7 @@ class FeatureSession(QtCore.QObject):
             return               # previewed after this one, never re-entered
         self._previewing = True
         start = time.perf_counter()
+        self._background(True)
         try:
             self._preview_now()
             took = time.perf_counter() - start
@@ -1640,10 +1648,66 @@ class FeatureSession(QtCore.QObject):
             if self.dialog is not None:
                 self.dialog.set_error(str(e))
         finally:
+            self._background(False)
             self._previewing = False
             after, self._after_preview = self._after_preview, None  # never kept for a later preview
+        self._job_started()
         if after and not self._closed:  # OK / Apply / Cancel pressed while the preview computed
             getattr(self, after)()
+
+    # ----- the Shell computed in a process of its own (the user: the window must not stand still; answers 16-20) -----
+    def _background(self, on):
+        if getattr(self.kind, "BACKGROUND", False):
+            from incad.core import shell_solid
+            shell_solid.BACKGROUND["on"] = bool(on)
+
+    def _job_running(self):
+        if not getattr(self.kind, "BACKGROUND", False):
+            return False
+        from incad.core import shell_solid
+        return shell_solid.running()
+
+    def _job_started(self):
+        """After a preview: a wall still computing shows "Computing…" (grey) over what shows now."""
+        if self._job_running() and not self._closed:
+            if self.dialog is not None and hasattr(self.dialog, "note"):
+                self.dialog.note("Computing…")
+            self._job_timer.start()
+
+    def _poll_job(self):
+        from incad.core import shell_solid
+        if self._closed:
+            self._job_timer.stop()
+            return
+        state = shell_solid.poll()
+        if state is False:
+            return
+        self._job_timer.stop()
+        if state is None:
+            return
+        if self._applied is not None and self.feature is not None and _feature_alive(self.feature):
+            self.feature.touch()  # the answer is taken by the same values' recompute
+            self._pending = self._applied
+            self._preview()
+        after, self._after_job = self._after_job, None
+        if after and not self._closed and not self._job_running():
+            getattr(self, after)()
+
+    def _stop_job(self):
+        from incad.core import shell_solid
+        self._job_timer.stop()
+        self._after_job = None
+        shell_solid.stop()
+
+    def escape(self):
+        """Esc: a wall computing in the background stops (what shows stays, the window stays open); else Cancel."""
+        if self._job_running():
+            self._stop_job()
+            self._applied = None  # what shows is not what the values say: OK computes them again (and waits)
+            if self.dialog is not None and hasattr(self.dialog, "note"):
+                self.dialog.note("Stopped")
+            return
+        self.cancel()
 
     def _preview_now(self):
         safe.watch_esc()  # Esc from now on stops a long preview (the user: Escape must cancel any operation)
@@ -2233,6 +2297,11 @@ class FeatureSession(QtCore.QObject):
             if self._pending is not None or current != self._applied:
                 self._pending = current
                 self._preview()
+        if self._job_running():  # the Shell still computing: OK waits for it (answer 18)
+            self._after_job = "apply" if self._applying else "ok"
+            if self.dialog is not None and hasattr(self.dialog, "note"):
+                self.dialog.note("Computing…")
+            return
         if self.feature is None and self.dialog is not None and not self.dialog.error_text():
             self.dialog.set_error("Nothing to create yet", waiting=True)
         if self.dialog is not None and self.dialog.error_text():
@@ -2300,7 +2369,11 @@ class FeatureSession(QtCore.QObject):
             return
         kind = self.kind
         carried = _carried(kind, self.dialog.values()) if self.dialog is not None else {}
-        self.ok()
+        self._applying = True
+        try:
+            self.ok()
+        finally:
+            self._applying = False
         # once, and only after a commit: a second Apply that landed during the preview is folded in, and an Esc
         # that landed there means stop (Inventor), not "and now the next one"
         if self._closed and self._committed and not self._again:
@@ -2326,6 +2399,8 @@ class FeatureSession(QtCore.QObject):
             self._after_preview = "cancel"
             return
         self._timer.stop()
+        if self._job_running():
+            self._stop_job()
         self._finish(commit=False)
 
     def _hide_used_sketches(self):
@@ -2389,6 +2464,10 @@ class FeatureSession(QtCore.QObject):
 
     def _finish_steps(self, commit):
         self._committed = commit
+        if self._job_running():
+            self._stop_job()
+        self._job_timer.stop()
+        self._background(False)
         self._peek_axes(False)
         self._sync_axis_line(False)
         self._timer.stop()  # a value edited during the last preview must not preview after the close
